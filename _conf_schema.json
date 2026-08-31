@@ -1,0 +1,67 @@
+{
+  "group_whitelist_enabled": {
+    "type": "bool",
+    "description": "启用群聊白名单",
+    "hint": "开启后，只允许“群聊白名单”中的群聊消息继续进入其他插件和 LLM。名单为空时拒绝全部群聊，但管理员绕过仍可生效。",
+    "default": true
+  },
+  "group_whitelist": {
+    "type": "list",
+    "description": "群聊白名单",
+    "hint": "每行填写一个群号；也支持填写完整 unified_msg_origin。只需命中其中一种标识即可放行。",
+    "default": [],
+    "items": {
+      "type": "string"
+    }
+  },
+  "private_whitelist_enabled": {
+    "type": "bool",
+    "description": "启用私聊白名单",
+    "hint": "开启后，只允许“私聊白名单”中的用户继续进入其他插件和 LLM；下方私聊指令豁免不受此名单限制。",
+    "default": true
+  },
+  "private_whitelist": {
+    "type": "list",
+    "description": "私聊白名单",
+    "hint": "每行填写一个用户 ID（QQ 场景填写 QQ 号）；也支持填写完整 unified_msg_origin。",
+    "default": [],
+    "items": {
+      "type": "string"
+    }
+  },
+  "private_bypass_commands": {
+    "type": "list",
+    "description": "私聊白名单豁免指令",
+    "hint": "这些根指令在私聊中无视私聊白名单。填写根指令名即可，不需要斜杠；默认仅放行 /rtlink。使用精确匹配，不会放行 /rtlinkevil。",
+    "default": [
+      "rtlink"
+    ],
+    "items": {
+      "type": "string"
+    }
+  },
+  "group_admin_bypass": {
+    "type": "bool",
+    "description": "管理员绕过群聊白名单",
+    "hint": "AstrBot 管理员在未列入群聊白名单的群中也可继续使用机器人。",
+    "default": true
+  },
+  "private_admin_bypass": {
+    "type": "bool",
+    "description": "管理员绕过私聊白名单",
+    "hint": "AstrBot 管理员私聊时无需加入私聊白名单。",
+    "default": true
+  },
+  "webchat_bypass": {
+    "type": "bool",
+    "description": "放行 WebChat",
+    "hint": "保持 AstrBot 原白名单对 WebChat 的绕过行为，避免 WebUI 调试会话被锁定。",
+    "default": true
+  },
+  "log_denied": {
+    "type": "bool",
+    "description": "记录拦截日志",
+    "hint": "记录被门禁拒绝的会话标识，但不会记录消息正文。",
+    "default": true
+  }
+}

@@ -1,0 +1,9 @@
+name: astrbot_plugin_access_gate
+display_name: 独立白名单门禁
+short_desc: 分别过滤群聊与私聊，并允许指定私聊指令绕过白名单。
+desc: 替代 AstrBot 的全局统一白名单，提供独立的群聊白名单、私聊白名单和私聊指令豁免。
+version: "1.0.0"
+author: Rio
+repo: ""
+astrbot_version: ">=4.24.0"
+

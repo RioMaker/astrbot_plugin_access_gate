@@ -105,6 +105,12 @@ class AccessGatePluginTests(unittest.TestCase):
         self.assertTrue(group_admin.stopped)
         self.assertFalse(private_admin.stopped)
 
+    def test_private_admin_is_blocked_by_default(self) -> None:
+        plugin = self.make_plugin()
+        event = MockEvent(private=True, message="/help", admin=True)
+        self.run_gate(plugin, event)
+        self.assertTrue(event.stopped)
+
     def test_webchat_bypass(self) -> None:
         plugin = self.make_plugin()
         event = MockEvent(private=True, platform="webchat", message="/help")
@@ -113,9 +119,20 @@ class AccessGatePluginTests(unittest.TestCase):
 
     def test_non_chat_event_without_group_id_is_not_blocked(self) -> None:
         plugin = self.make_plugin()
-        event = MockEvent(private=False, group_id="")
+        event = MockEvent(private=False, group_id="", sender_id="")
         self.run_gate(plugin, event)
         self.assertFalse(event.stopped)
+
+    def test_sender_event_without_group_id_is_filtered_as_private(self) -> None:
+        plugin = self.make_plugin()
+        event = MockEvent(
+            private=False,
+            group_id="",
+            sender_id="10001",
+            message="普通对话",
+        )
+        self.run_gate(plugin, event)
+        self.assertTrue(event.stopped)
 
     @staticmethod
     def run_import(
@@ -161,6 +178,15 @@ class AccessGatePluginTests(unittest.TestCase):
         self.assertTrue(event.stopped)
         self.assertEqual(results, [])
         self.assertNotIn("group_whitelist", plugin.config)
+
+    def test_status_reports_effective_private_admin_bypass(self) -> None:
+        plugin = self.make_plugin(private_admin_bypass=False)
+        event = MockEvent(private=True, admin=True)
+        results = self.run_import(plugin, event, "status")
+        self.assertTrue(event.stopped)
+        self.assertIn("私聊白名单：开启", results[0])
+        self.assertIn("管理员绕过=关", results[0])
+        self.assertIn("私聊豁免指令：rtlink", results[0])
 
 
 if __name__ == "__main__":

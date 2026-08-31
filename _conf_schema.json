@@ -49,8 +49,8 @@
   "private_admin_bypass": {
     "type": "bool",
     "description": "管理员绕过私聊白名单",
-    "hint": "AstrBot 管理员私聊时无需加入私聊白名单。",
-    "default": true
+    "hint": "开启后，AstrBot 管理员私聊时可以使用所有指令和 Agent 对话。为保证私聊仅豁免指定指令，默认关闭。",
+    "default": false
   },
   "webchat_bypass": {
     "type": "bool",

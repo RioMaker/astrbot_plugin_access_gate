@@ -14,7 +14,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "独立过滤群聊和私聊白名单，并允许指定私聊指令绕过"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -209,6 +209,18 @@ class AccessGatePlugin(Star):
         platform = str(event.get_platform_name() or "").strip().casefold()
         return platform == "webchat"
 
+    @staticmethod
+    def _is_private_event(event: AstrMessageEvent) -> bool:
+        if event.is_private_chat():
+            return True
+        # Some adapters or temporary-chat implementations may expose a
+        # user-originated direct message as OTHER_MESSAGE. Treat any event
+        # with a sender but no group as private so it fails closed instead of
+        # bypassing both policies.
+        sender_id = str(event.get_sender_id() or "").strip()
+        group_id = str(event.get_group_id() or "").strip()
+        return bool(sender_id and not group_id)
+
     def _log_denied(self, event: AstrMessageEvent, scope: str) -> None:
         if not self._bool("log_denied", True):
             return
@@ -234,9 +246,35 @@ class AccessGatePlugin(Star):
             return
 
         text = str(content or "").strip()
+        if text.casefold() in {"status", "状态"}:
+            group_enabled = self._bool("group_whitelist_enabled", True)
+            private_enabled = self._bool("private_whitelist_enabled", True)
+            group_admin_bypass = self._bool("group_admin_bypass", True)
+            private_admin_bypass = self._bool("private_admin_bypass", False)
+            webchat_bypass = self._bool("webchat_bypass", True)
+            bypass_commands = sorted(
+                self._entries(
+                    "private_bypass_commands",
+                    DEFAULT_PRIVATE_BYPASS_COMMANDS,
+                )
+            )
+            yield event.plain_result(
+                "访问门禁状态：\n"
+                f"群聊白名单：{'开启' if group_enabled else '关闭'}，"
+                f"{len(self._entries('group_whitelist'))} 条，"
+                f"管理员绕过={'开' if group_admin_bypass else '关'}\n"
+                f"私聊白名单：{'开启' if private_enabled else '关闭'}，"
+                f"{len(self._entries('private_whitelist'))} 条，"
+                f"管理员绕过={'开' if private_admin_bypass else '关'}\n"
+                f"私聊豁免指令：{', '.join(bypass_commands) or '无'}\n"
+                f"WebChat 绕过：{'开' if webchat_bypass else '关'}"
+            )
+            return
+
         if text.casefold() in {"help", "帮助"}:
             yield event.plain_result(
                 "批量导入白名单：\n"
+                "/accessgate status  查看实际生效配置\n"
                 "/accessgate import group <JSON、逐行或逗号分隔的群号>\n"
                 "/accessgate import private <JSON、逐行或逗号分隔的用户ID>\n"
                 "中文同义写法：/accessgate 导入 群聊|私聊 <内容>\n"
@@ -284,10 +322,10 @@ class AccessGatePlugin(Star):
         if self._bool("webchat_bypass", True) and self._is_webchat(event):
             return
 
-        if event.is_private_chat():
+        if self._is_private_event(event):
             if self._is_private_bypass_command(event):
                 return
-            if self._bool("private_admin_bypass", True) and event.is_admin():
+            if self._bool("private_admin_bypass", False) and event.is_admin():
                 return
             if not self._bool("private_whitelist_enabled", True):
                 return
@@ -299,8 +337,8 @@ class AccessGatePlugin(Star):
             event.stop_event()
             return
 
-        # EventMessageType.ALL can also include non-chat platform events. Only
-        # apply the group policy when AstrBot supplies an actual group ID.
+        # EventMessageType.ALL can also include system events. Only events
+        # without both a sender and a group reach this pass-through branch.
         if not str(event.get_group_id() or "").strip():
             return
         if self._bool("group_admin_bypass", True) and event.is_admin():

@@ -3,6 +3,58 @@
   "wake_names": {"type": "list", "description": "机器人称呼", "default": ["可可子"], "items": {"type": "string"}, "hint": "开头呼叫直接回复；正文提及先判断是否回复。只检查本次正文。"},
   "mention_judge_enabled": {"type": "bool", "description": "正文提及时由 LLM 判断是否回复", "default": true, "hint": "使用当前会话模型，无工具、无历史写入；超时20秒或解析失败保持沉默。沉默也消耗一次判断请求。"},
   "wake_on_at": {"type": "bool", "description": "允许单独 @ 机器人唤醒", "default": true},
+  "group_rest_enabled": {
+    "type": "bool",
+    "description": "启用群聊休息时段",
+    "default": true,
+    "hint": "仅对下方填写的群聊生效。每天按北京时间判断；休息期间暂停普通消息和业务指令，直接 @ 机器人时回复提示。管理员 /accessgate 管理指令仍可使用。"
+  },
+  "group_rest_rules": {
+    "type": "template_list",
+    "description": "群聊休息规则",
+    "hint": "每条规则独立设置群号、休息时间和回复内容。群号留空不生效；默认休息 08:00–16:00。支持跨午夜；多条同时命中时使用列表中第一条。",
+    "default": [
+      {
+        "__template_key": "group_rest",
+        "group_id": "",
+        "start": "08:00",
+        "end": "16:00",
+        "reply": "休息ing，工作时间：{work_start}-{work_end}"
+      }
+    ],
+    "templates": {
+      "group_rest": {
+        "name": "群聊休息时段",
+        "display_item": "group_id",
+        "items": {
+          "group_id": {
+            "type": "string",
+            "description": "群聊号",
+            "default": "",
+            "hint": "填写一个群号，也支持完整 unified_msg_origin。休息规则不会自动加入白名单，群聊须先通过现有门禁。"
+          },
+          "start": {
+            "type": "string",
+            "description": "休息开始时间",
+            "default": "08:00",
+            "hint": "北京时间 HH:MM，范围 00:00–23:59；从这一分钟开始休息。"
+          },
+          "end": {
+            "type": "string",
+            "description": "休息结束时间",
+            "default": "16:00",
+            "hint": "北京时间 HH:MM；到这一分钟恢复工作。早于开始时间表示跨午夜；开始和结束不能相同。"
+          },
+          "reply": {
+            "type": "text",
+            "description": "休息时被 @ 的回复内容",
+            "default": "休息ing，工作时间：{work_start}-{work_end}",
+            "hint": "可直接填写固定文字；也可使用 {rest_start}、{rest_end}、{work_start}、{work_end}。默认显示：休息ing，工作时间：16:00-次日08:00。工作时间占位符表示本条休息时段的剩余时间。"
+          }
+        }
+      }
+    }
+  },
   "group_whitelist_enabled": {
     "type": "bool",
     "description": "启用群聊白名单",

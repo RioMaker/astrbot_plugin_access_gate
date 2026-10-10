@@ -1,7 +1,7 @@
 """Small AstrBot API shim used by the plugin unit tests."""
 
-from types import ModuleType, SimpleNamespace
 import sys
+from types import ModuleType, SimpleNamespace
 
 
 class FakeLogger:
@@ -151,6 +151,9 @@ class MockEvent:
 
     def stop_event(self) -> None:
         self.stopped = True
+
+    def is_stopped(self) -> bool:
+        return self.stopped
 
     def plain_result(self, text: str) -> str:
         return text

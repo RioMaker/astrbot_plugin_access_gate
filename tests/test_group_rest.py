@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_access_gate import main
-from test_wake import At, Context, Event, Plain, Reply
+from test_wake import At, Context, Event, Image, Plain, Reply
 
 
 class GroupEvent(Event):
@@ -103,7 +103,6 @@ class GroupRestTests(unittest.TestCase):
             "普通消息",
             "可可子，帮我看看",
             "这个问题可可子知道吗",
-            "/rtlink score",
         ):
             with self.subTest(text=text):
                 event, context, _ = self.run_event(GroupEvent(text))
@@ -112,12 +111,80 @@ class GroupRestTests(unittest.TestCase):
                 self.assertEqual(event.sent, [])
                 self.assertEqual(context.calls, [])
 
-    def test_at_command_is_intercepted_before_business_handler(self):
+    def test_commands_are_allowed_with_or_without_at(self):
+        for text in ("/rtlink score", "/help", "!help", "！help"):
+            for at in (False, True):
+                with self.subTest(text=text, at=at):
+                    event = GroupEvent(text)
+                    if at:
+                        event.message_obj.message.insert(0, At())
+                    event.is_at_or_wake_command = True
+                    event, context, _ = self.run_event(event)
+                    self.assertFalse(event.is_stopped())
+                    self.assertTrue(event.call_llm)
+                    self.assertEqual(event.sent, [])
+                    self.assertEqual(context.calls, [])
+
+    def test_command_prefix_stripped_by_core_is_still_allowed(self):
         event = GroupEvent("/rtlink score")
+        event.message_str = "rtlink score"
+        event, _, _ = self.run_event(event)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(event.sent, [])
+
+    def test_core_matched_command_without_slash_is_allowed(self):
+        event = GroupEvent("help")
         event.message_obj.message.insert(0, At())
+        event.is_at_or_wake_command = True
+        event.extras["handlers_parsed_params"] = {"plugin.help": {}}
         event, context, _ = self.run_event(event)
-        self.assertEqual(event.sent, ["休息ing，工作时间：16:00-次日08:00"])
+        self.assertFalse(event.is_stopped())
+        self.assertTrue(event.call_llm)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(context.calls, [])
+
+    def test_command_exception_does_not_bypass_whitelist(self):
+        event, context, _ = self.run_event(
+            GroupEvent("/rtlink score"), config={"group_whitelist": []}
+        )
         self.assertTrue(event.is_stopped())
+        self.assertEqual(event.sent, [])
+        self.assertEqual(context.calls, [])
+
+    def test_unknown_commands_do_not_fall_back_to_chat_when_wake_is_disabled(self):
+        event = GroupEvent("/unknown_command")
+        event.message_obj.message.insert(0, At())
+        event.is_at_or_wake_command = True
+        event, context, _ = self.run_event(event, config={"wake_enabled": False})
+        self.assertFalse(event.is_stopped())
+        self.assertTrue(event.call_llm)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(context.calls, [])
+
+    def test_at_only_and_at_media_never_enter_default_agent(self):
+        for chain in ([At()], [At(), Plain(" \t\n")], [At(), Image()]):
+            for route_only in (False, True):
+                with self.subTest(chain=chain, route_only=route_only):
+                    event = GroupEvent("")
+                    event.message_obj.message = chain
+                    event.is_at_or_wake_command = True
+                    event.is_wake = True
+                    event, context, _ = self.run_event(event, route_only=route_only)
+                    self.assertTrue(event.is_stopped())
+                    self.assertTrue(event.call_llm)
+                    self.assertFalse(event.is_at_or_wake_command)
+                    self.assertEqual(event.sent, ["休息ing，工作时间：16:00-次日08:00"])
+                    self.assertEqual(context.calls, [])
+
+    def test_core_quote_wake_is_cleared_without_reply(self):
+        event = GroupEvent("")
+        event.message_obj.message = [Reply()]
+        event.is_at_or_wake_command = True
+        event, context, _ = self.run_event(event)
+        self.assertTrue(event.is_stopped())
+        self.assertTrue(event.call_llm)
+        self.assertFalse(event.is_at_or_wake_command)
+        self.assertEqual(event.sent, [])
         self.assertEqual(context.calls, [])
 
     def test_at_other_all_and_quoted_at_are_silent(self):

@@ -16,7 +16,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "独立群聊/私聊白名单、插件唤醒与指定群聊休息时段"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -157,11 +157,17 @@ class AccessGatePlugin(Star):
         )
         if rule is None:
             return
-        # Freeze the decision and reply before sending. Rest suppresses both
-        # default Agent calls and lower-priority handlers, including commands.
+        # Commands may continue to their handlers, including explicit LLM
+        # requests, but must never fall back to the default chat Agent.
+        event.should_call_llm(True)
+        if self._is_command_message(event):
+            return
+        # Also clear the core's @/quote wake flag for empty-text messages.
+        # Freeze the decision and reply before sending, then stop all other
+        # handlers for this non-command event.
         self_id = str(event.get_self_id() or "")
         reply = rule.reply_text() if self._at_self(event) else None
-        event.should_call_llm(True)
+        event.is_at_or_wake_command = False
         event.stop_event()
         if self_id and str(event.get_sender_id()) == self_id:
             return
@@ -454,6 +460,16 @@ class AccessGatePlugin(Star):
             getattr(event.message_obj, "message_str", event.message_str) or ""
         ).strip()
 
+    @classmethod
+    def _is_command_message(cls, event: AstrMessageEvent) -> bool:
+        # The core may already have stripped the wake prefix from message_str.
+        # Read the original top-level text, or its matched command parameters
+        # for bare @ commands and commands using a custom wake prefix.
+        text = cls._own_text(event)
+        if text.startswith(tuple(COMMAND_PREFIXES)) and cls._root_command(text):
+            return True
+        return bool(event.get_extra("handlers_parsed_params", {}))
+
     async def _judge_mention(self, event: AstrMessageEvent, text: str) -> bool:
         provider = self.context.get_using_provider(umo=event.unified_msg_origin)
         if provider is None:
@@ -488,7 +504,9 @@ class AccessGatePlugin(Star):
         if event.is_stopped():
             return
         await self._enforce_group_rest(event)
-        if event.is_stopped() or not self._bool("wake_enabled", True):
+        if event.is_stopped():
+            return
+        if not self._bool("wake_enabled", True):
             return
         self_id = str(event.get_self_id() or "")
         if self_id and str(event.get_sender_id()) == self_id:
@@ -502,7 +520,7 @@ class AccessGatePlugin(Star):
         # Explicit LLM requests made inside command plugins remain supported.
         event.should_call_llm(True)
         text = self._own_text(event)
-        if text.startswith("/"):
+        if text.startswith("/") or self._is_command_message(event):
             return
         names = sorted(self._entries("wake_names", ("可可子",)), key=len, reverse=True)
         direct = next((name for name in names if text.startswith(name)), None)

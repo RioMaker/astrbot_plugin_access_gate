@@ -133,6 +133,7 @@ class MockEvent:
             else f"aiocqhttp:GroupMessage:{group_id}"
         )
         self.stopped = False
+        self.extras: dict[str, object] = {}
 
     def is_private_chat(self) -> bool:
         return self._private
@@ -154,6 +155,9 @@ class MockEvent:
 
     def is_stopped(self) -> bool:
         return self.stopped
+
+    def get_extra(self, key: str, default=None):
+        return self.extras.get(key, default)
 
     def plain_result(self, text: str) -> str:
         return text

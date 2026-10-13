@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "独立群聊/私聊白名单、插件唤醒与指定群聊休息时段"
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.2.2"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -131,8 +132,61 @@ class AccessGatePlugin(Star):
         self_id = str(event.get_self_id() or "")
         return bool(self_id) and any(
             type(part).__name__ == "At" and str(getattr(part, "qq", "")) == self_id
-            for part in getattr(event.message_obj, "message", ())
+            for part in (getattr(event.message_obj, "message", ()) or ())
         )
+
+    @staticmethod
+    def _has_visible_text(value: object) -> bool:
+        return any(
+            not char.isspace() and unicodedata.category(char) not in {"Cf", "Cc"}
+            for char in str(value or "")
+        )
+
+    @classmethod
+    def _has_attached_information(cls, event: AstrMessageEvent) -> bool:
+        chain = getattr(event.message_obj, "message", None)
+        if chain is None:
+            return cls._has_visible_text(cls._own_text(event))
+        pending = list(chain)
+        seen: set[int] = set()
+        while pending:
+            part = pending.pop()
+            if id(part) in seen:
+                continue
+            seen.add(id(part))
+            kind = type(part).__name__
+            if kind in {"At", "AtAll"}:
+                continue
+            if kind == "Plain":
+                if cls._has_visible_text(getattr(part, "text", "")):
+                    return True
+            elif kind == "Reply":
+                if cls._has_visible_text(
+                    getattr(part, "message_str", "")
+                ) or cls._has_visible_text(getattr(part, "text", "")):
+                    return True
+                pending.extend(getattr(part, "chain", ()) or ())
+            else:
+                return True
+        return False
+
+    async def _enforce_empty_at(self, event: AstrMessageEvent) -> None:
+        # A bare @ must not fall back to the native Agent, even when plugin
+        # wake routing is disabled. Rest handling has already taken precedence.
+        if (
+            self._is_webchat(event)
+            or not event.get_sender_id()
+            or not self._at_self(event)
+            or self._has_attached_information(event)
+        ):
+            return
+        event.should_call_llm(True)
+        event.is_at_or_wake_command = False
+        event.stop_event()
+        if str(event.get_sender_id()) == str(event.get_self_id()):
+            return
+        if self._bool("wake_enabled", True) and self._bool("wake_on_at", True):
+            await event.send(event.plain_result("我在，请继续说。"))
 
     async def _enforce_group_rest(self, event: AstrMessageEvent) -> None:
         if (
@@ -446,6 +500,8 @@ class AccessGatePlugin(Star):
         await self._enforce_access(event)
         if not event.is_stopped():
             await self._enforce_group_rest(event)
+        if not event.is_stopped():
+            await self._enforce_empty_at(event)
 
     @staticmethod
     def _own_text(event: AstrMessageEvent) -> str:
@@ -466,6 +522,8 @@ class AccessGatePlugin(Star):
         # Read the original top-level text, or its matched command parameters
         # for bare @ commands and commands using a custom wake prefix.
         text = cls._own_text(event)
+        if not cls._has_visible_text(text):
+            return False
         if text.startswith(tuple(COMMAND_PREFIXES)) and cls._root_command(text):
             return True
         return bool(event.get_extra("handlers_parsed_params", {}))
@@ -504,6 +562,9 @@ class AccessGatePlugin(Star):
         if event.is_stopped():
             return
         await self._enforce_group_rest(event)
+        if event.is_stopped():
+            return
+        await self._enforce_empty_at(event)
         if event.is_stopped():
             return
         if not self._bool("wake_enabled", True):

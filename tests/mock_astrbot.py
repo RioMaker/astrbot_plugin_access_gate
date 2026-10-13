@@ -144,6 +144,9 @@ class MockEvent:
     def get_sender_id(self) -> str:
         return self._sender_id
 
+    def get_self_id(self) -> str:
+        return "999"
+
     def get_group_id(self) -> str:
         return self._group_id
 

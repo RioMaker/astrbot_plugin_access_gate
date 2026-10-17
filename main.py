@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -17,7 +17,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "独立群聊/私聊白名单、插件唤醒与指定群聊休息时段"
-PLUGIN_VERSION = "1.2.2"
+PLUGIN_VERSION = "1.3.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -32,6 +32,7 @@ DEFAULT_REST_START = "08:00"
 DEFAULT_REST_END = "16:00"
 DEFAULT_REST_REPLY = "休息ing，工作时间：{work_start}-{work_end}"
 REST_TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+REST_WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 
 
 @dataclass(frozen=True)
@@ -40,20 +41,47 @@ class GroupRestRule:
     start: int
     end: int
     reply: str
+    weekdays: frozenset[int]
 
-    def is_active(self, minute: int) -> bool:
+    def _start_day(self, now: datetime) -> date:
+        # The early-morning part of an overnight window belongs to yesterday.
+        if self.start > self.end and now.hour * 60 + now.minute < self.end:
+            return now.date() - timedelta(days=1)
+        return now.date()
+
+    def is_active(self, now: datetime) -> bool:
+        if self._start_day(now).weekday() not in self.weekdays:
+            return False
+        minute = now.hour * 60 + now.minute
         if self.start < self.end:
             return self.start <= minute < self.end
         return minute >= self.start or minute < self.end
 
-    def reply_text(self) -> str:
+    def reply_text(self, now: datetime) -> str:
         start = f"{self.start // 60:02d}:{self.start % 60:02d}"
         end = f"{self.end // 60:02d}:{self.end % 60:02d}"
+        rest_day = self._start_day(now)
+        next_days = next(
+            days
+            for days in range(1, 8)
+            if (rest_day.weekday() + days) % 7 in self.weekdays
+        )
+        # Relative labels are measured from this rest window's end date.
+        work_days = next_days - int(self.start > self.end)
+        if work_days == 0:
+            work_end = start
+        elif work_days == 1:
+            work_end = "次日" + start
+        else:
+            next_day = rest_day + timedelta(days=next_days)
+            work_end = (
+                f"{next_day.isoformat()}（{REST_WEEKDAYS[next_day.weekday()]}）{start}"
+            )
         values = {
             "rest_start": start,
             "rest_end": end,
             "work_start": end,
-            "work_end": ("次日" if self.start < self.end else "") + start,
+            "work_end": work_end,
         }
         text = self.reply
         for key, value in values.items():
@@ -94,6 +122,17 @@ class AccessGatePlugin(Star):
         hour, minute = text.split(":")
         return int(hour) * 60 + int(minute)
 
+    @staticmethod
+    def _rest_weekdays(value: object) -> frozenset[int]:
+        if not isinstance(value, list) or not value:
+            raise ValueError("生效星期必须为列表，至少选择 1 个、最多 7 个不同星期")
+        weekdays: set[int] = set()
+        for day in value:
+            if not isinstance(day, str) or day.strip() not in REST_WEEKDAYS:
+                raise ValueError("生效星期只能选择星期一至星期日")
+            weekdays.add(REST_WEEKDAYS.index(day.strip()))
+        return frozenset(weekdays)
+
     def _load_rest_rules(self) -> tuple[GroupRestRule, ...]:
         raw = self.config.get("group_rest_rules", [])
         if not isinstance(raw, list):
@@ -116,7 +155,10 @@ class AccessGatePlugin(Star):
                     raise TypeError("休息回复内容必须是文字")
                 if not reply.strip():
                     raise ValueError("休息回复内容不能为空")
-                rules.append(GroupRestRule(group_id, start, end, reply))
+                weekdays = self._rest_weekdays(
+                    item.get("weekdays", list(REST_WEEKDAYS))
+                )
+                rules.append(GroupRestRule(group_id, start, end, reply, weekdays))
             except (TypeError, ValueError) as exc:
                 logger.error(
                     f"[access_gate] 第 {index} 条群聊休息规则无效，已忽略：{exc}"
@@ -199,13 +241,12 @@ class AccessGatePlugin(Star):
         ):
             return
         now = self._now()
-        minute = now.hour * 60 + now.minute
         identifiers = self._event_identifiers(event, private=False)
         rule = next(
             (
                 rule
                 for rule in self.rest_rules
-                if rule.group_id in identifiers and rule.is_active(minute)
+                if rule.group_id in identifiers and rule.is_active(now)
             ),
             None,
         )
@@ -220,7 +261,7 @@ class AccessGatePlugin(Star):
         # Freeze the decision and reply before sending, then stop all other
         # handlers for this non-command event.
         self_id = str(event.get_self_id() or "")
-        reply = rule.reply_text() if self._at_self(event) else None
+        reply = rule.reply_text(now) if self._at_self(event) else None
         event.is_at_or_wake_command = False
         event.stop_event()
         if self_id and str(event.get_sender_id()) == self_id:

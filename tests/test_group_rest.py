@@ -29,12 +29,14 @@ class GroupEvent(Event):
 
 
 class GroupRestTests(unittest.TestCase):
+    WEEKDAYS = [f"星期{day}" for day in "一二三四五六日"]
+
     @staticmethod
     def rule(**fields):
         return {"group_id": "20001", **fields}
 
     def run_event(
-        self, event=None, *, hour=10, minute=0, config=None, route_only=False
+        self, event=None, *, hour=10, minute=0, now=None, config=None, route_only=False
     ):
         context = Context('{"should_reply":true}', {})
         settings = {
@@ -45,7 +47,7 @@ class GroupRestTests(unittest.TestCase):
         }
         plugin = main.AccessGatePlugin(context, settings)
         event = event or GroupEvent()
-        now = datetime(2026, 10, 10, hour, minute, tzinfo=main.REST_TIMEZONE)
+        now = now or datetime(2026, 10, 10, hour, minute, tzinfo=main.REST_TIMEZONE)
 
         async def dispatch():
             if not route_only:
@@ -97,6 +99,237 @@ class GroupRestTests(unittest.TestCase):
                 self.assertEqual(
                     event.sent, ["休息ing，工作时间：06:00-22:00"] if resting else []
                 )
+
+    def test_weekday_selection_supports_each_single_day_multiple_days_and_all_days(
+        self,
+    ):
+        selections = [[day] for day in self.WEEKDAYS] + [
+            ["星期一", "星期三", "星期日"],
+            self.WEEKDAYS,
+        ]
+        for selected in selections:
+            for offset, day in enumerate(self.WEEKDAYS):
+                with self.subTest(selected=selected, day=day):
+                    now = datetime(2026, 10, 5 + offset, 10, tzinfo=main.REST_TIMEZONE)
+                    event, context, _ = self.run_event(
+                        GroupEvent("可可子，你好"),
+                        now=now,
+                        config={"group_rest_rules": [self.rule(weekdays=selected)]},
+                    )
+                    resting = day in selected
+                    self.assertEqual(event.is_stopped(), resting)
+                    self.assertEqual(event.call_llm, resting)
+                    self.assertEqual(event.is_at_or_wake_command, not resting)
+                    self.assertEqual(event.sent, [])
+                    self.assertEqual(context.calls, [])
+
+    def test_missing_weekdays_keeps_legacy_daily_rules(self):
+        for offset in range(7):
+            with self.subTest(weekday=offset):
+                now = datetime(2026, 10, 5 + offset, 10, tzinfo=main.REST_TIMEZONE)
+                event, _, plugin = self.run_event(now=now)
+                self.assertTrue(event.is_stopped())
+                self.assertEqual(plugin.rest_rules[0].weekdays, frozenset(range(7)))
+
+    def test_cross_midnight_weekdays_belong_to_start_day_including_sunday(self):
+        rules = [self.rule(weekdays=["星期五", "星期日"], start="22:00", end="06:00")]
+        for day, hour, minute, resting in (
+            (9, 5, 59, False),
+            (9, 21, 59, False),
+            (9, 22, 0, True),
+            (9, 23, 59, True),
+            (10, 0, 0, True),
+            (10, 5, 59, True),
+            (10, 6, 0, False),
+            (10, 22, 0, False),
+            (11, 5, 59, False),
+            (11, 22, 0, True),
+            (12, 0, 0, True),
+            (12, 5, 59, True),
+            (12, 6, 0, False),
+        ):
+            with self.subTest(day=day, hour=hour, minute=minute):
+                event = GroupEvent()
+                event.message_obj.message.insert(0, At())
+                event, context, _ = self.run_event(
+                    event,
+                    now=datetime(
+                        2026, 10, day, hour, minute, tzinfo=main.REST_TIMEZONE
+                    ),
+                    config={"group_rest_rules": rules},
+                )
+                self.assertEqual(event.is_stopped(), resting)
+                self.assertEqual(event.call_llm, resting)
+                self.assertEqual(event.is_at_or_wake_command, not resting)
+                self.assertEqual(len(event.sent), int(resting))
+                self.assertEqual(context.calls, [])
+
+    def test_invalid_weekdays_reject_only_the_invalid_rule_and_log_error(self):
+        invalid = (
+            [],
+            None,
+            "星期一",
+            1,
+            ("星期一",),
+            [True],
+            [0],
+            ["周一"],
+            ["星期一", "星期八"],
+            [["星期一"]],
+        )
+        for weekdays in invalid:
+            with self.subTest(weekdays=weekdays):
+                rule = self.rule(weekdays=weekdays)
+                with patch.object(main.logger, "error") as log_error:
+                    event, context, plugin = self.run_event(
+                        GroupEvent("可可子，你好"),
+                        config={"group_rest_rules": [rule]},
+                    )
+                self.assertEqual(plugin.rest_rules, ())
+                self.assertFalse(event.is_stopped())
+                self.assertTrue(event.is_at_or_wake_command)
+                self.assertFalse(event.call_llm)
+                self.assertEqual(context.calls, [])
+                log_error.assert_called_once()
+                with patch.object(main.logger, "error"):
+                    event, _, plugin = self.run_event(
+                        config={"group_rest_rules": [rule, self.rule()]}
+                    )
+                self.assertTrue(event.is_stopped())
+                self.assertEqual(len(plugin.rest_rules), 1)
+
+    def test_duplicate_weekdays_are_deduplicated(self):
+        event, _, plugin = self.run_event(
+            config={
+                "group_rest_rules": [self.rule(weekdays=["星期六", "星期二", "星期六"])]
+            }
+        )
+        self.assertTrue(event.is_stopped())
+        self.assertIsInstance(plugin.rest_rules[0].weekdays, frozenset)
+        self.assertEqual(plugin.rest_rules[0].weekdays, frozenset({1, 5}))
+
+    def test_first_rule_with_matching_time_but_wrong_weekday_is_skipped(self):
+        rules = [
+            self.rule(weekdays=["星期五"], reply="星期未命中"),
+            self.rule(weekdays=["星期六"], reply="首条生效"),
+            self.rule(weekdays=self.WEEKDAYS, reply="后续生效"),
+        ]
+        event = GroupEvent()
+        event.message_obj.message.insert(0, At())
+        event, _, _ = self.run_event(event, config={"group_rest_rules": rules})
+        self.assertEqual(event.sent, ["首条生效"])
+
+    def test_work_end_uses_next_selected_weekday_relative_to_rest_end(self):
+        workdays = self.WEEKDAYS[:5]
+        for weekdays, start, end, day, hour, expected in (
+            (workdays, "08:00", "16:00", 9, 10, "16:00-2026-10-12（星期一）08:00"),
+            (workdays, "08:00", "16:00", 5, 10, "16:00-次日08:00"),
+            (["星期五"], "08:00", "16:00", 9, 10, "16:00-2026-10-16（星期五）08:00"),
+            (["星期五"], "22:00", "06:00", 9, 23, "06:00-2026-10-16（星期五）22:00"),
+            (["星期五"], "22:00", "06:00", 10, 5, "06:00-2026-10-16（星期五）22:00"),
+            (["星期五", "星期日"], "22:00", "06:00", 9, 23, "06:00-次日22:00"),
+            (["星期五", "星期六"], "22:00", "06:00", 9, 23, "06:00-22:00"),
+            (self.WEEKDAYS, "22:00", "06:00", 10, 5, "06:00-22:00"),
+        ):
+            with self.subTest(weekdays=weekdays, day=day, hour=hour):
+                event = GroupEvent()
+                event.message_obj.message.insert(0, At())
+                event, _, _ = self.run_event(
+                    event,
+                    now=datetime(2026, 10, day, hour, tzinfo=main.REST_TIMEZONE),
+                    config={
+                        "group_rest_rules": [
+                            self.rule(
+                                weekdays=weekdays,
+                                start=start,
+                                end=end,
+                                reply="{work_start}-{work_end}",
+                            )
+                        ]
+                    },
+                )
+                self.assertEqual(event.sent, [expected])
+
+    def test_weekday_match_preserves_commands_wake_and_empty_at_policy(self):
+        rules = [self.rule(weekdays=self.WEEKDAYS[:5])]
+        for day, resting in ((9, True), (10, False)):
+            for kind in ("command", "core_command", "name", "mention", "empty_at"):
+                with self.subTest(day=day, kind=kind):
+                    text = {
+                        "command": "/unknown_command",
+                        "core_command": "help",
+                        "name": "可可子，你好",
+                        "mention": "这个问题可可子知道吗",
+                        "empty_at": "",
+                    }[kind]
+                    event = GroupEvent(text)
+                    if kind in {"command", "core_command", "empty_at"}:
+                        event.message_obj.message.insert(0, At())
+                        event.is_at_or_wake_command = True
+                    if kind == "core_command":
+                        event.extras["handlers_parsed_params"] = {"plugin.help": {}}
+                    event, context, _ = self.run_event(
+                        event,
+                        now=datetime(2026, 10, day, 10, tzinfo=main.REST_TIMEZONE),
+                        config={"group_rest_rules": rules},
+                    )
+                    if kind in {"command", "core_command"}:
+                        self.assertFalse(event.is_stopped())
+                        self.assertTrue(event.call_llm)
+                        self.assertEqual(event.sent, [])
+                    elif kind == "empty_at":
+                        self.assertTrue(event.is_stopped())
+                        self.assertTrue(event.call_llm)
+                        self.assertFalse(event.is_at_or_wake_command)
+                        self.assertEqual(
+                            event.sent,
+                            ["休息ing，工作时间：16:00-2026-10-12（星期一）08:00"]
+                            if resting
+                            else ["我在，请继续说。"],
+                        )
+                    else:
+                        self.assertEqual(event.is_stopped(), resting)
+                        self.assertEqual(event.call_llm, resting)
+                        self.assertEqual(event.is_at_or_wake_command, not resting)
+                        self.assertEqual(event.sent, [])
+                    self.assertEqual(
+                        len(context.calls), int(kind == "mention" and not resting)
+                    )
+
+    def test_weekday_switches_at_beijing_midnight_on_a_utc_host(self):
+        for minute, resting in ((59, False), (0, True)):
+            instant = datetime(
+                2026, 10, 11, 15 if minute else 16, minute, tzinfo=timezone.utc
+            )
+            with self.subTest(instant=instant):
+                context = Context('{"should_reply":true}', {})
+                plugin = main.AccessGatePlugin(
+                    context,
+                    {
+                        "group_whitelist": ["20001"],
+                        "group_rest_rules": [
+                            self.rule(weekdays=["星期一"], start="00:00", end="01:00")
+                        ],
+                    },
+                )
+                event = GroupEvent()
+                event.message_obj.message.insert(0, At())
+
+                async def dispatch():
+                    await plugin.enforce_access(event)
+                    if not event.is_stopped():
+                        await plugin.route_wake(event)
+
+                with patch.object(main, "datetime", wraps=datetime) as clock:
+                    clock.now.side_effect = lambda tz: instant.astimezone(tz)
+                    asyncio.run(dispatch())
+                self.assertTrue(clock.now.called)
+                for call in clock.now.call_args_list:
+                    self.assertEqual(call.args, (main.REST_TIMEZONE,))
+                self.assertEqual(event.is_stopped(), resting)
+                self.assertEqual(len(event.sent), int(resting))
+                self.assertEqual(event.call_llm, resting)
+                self.assertEqual(context.calls, [])
 
     def test_silent_messages_do_not_call_classifier(self):
         for text in (
@@ -378,6 +611,9 @@ class GroupRestTests(unittest.TestCase):
         template = schema["group_rest_rules"]["templates"][default["__template_key"]][
             "items"
         ]
+        self.assertEqual(default["weekdays"], self.WEEKDAYS)
+        self.assertEqual(template["weekdays"]["type"], "list")
+        self.assertEqual(template["weekdays"]["options"], self.WEEKDAYS)
         self.assertEqual(
             default,
             {

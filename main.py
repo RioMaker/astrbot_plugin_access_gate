@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -16,8 +16,8 @@ from astrbot.core.star.filter.command import GreedyStr
 
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
-PLUGIN_DESC = "独立群聊/私聊白名单、插件唤醒与指定群聊休息时段"
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_DESC = "独立群聊/私聊白名单、插件唤醒与指定群聊开放时段"
+PLUGIN_VERSION = "1.4.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -37,51 +37,35 @@ REST_WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五"
 
 @dataclass(frozen=True)
 class GroupRestRule:
+    """An open window loaded from the legacy group_rest_rules config key."""
+
     group_id: str
     start: int
     end: int
     reply: str
     weekdays: frozenset[int]
 
-    def _start_day(self, now: datetime) -> date:
-        # The early-morning part of an overnight window belongs to yesterday.
-        if self.start > self.end and now.hour * 60 + now.minute < self.end:
-            return now.date() - timedelta(days=1)
-        return now.date()
-
     def is_active(self, now: datetime) -> bool:
-        if self._start_day(now).weekday() not in self.weekdays:
+        # Both constraints apply to the current Beijing date and time, including
+        # the early-morning segment of a window that wraps around midnight.
+        if now.weekday() not in self.weekdays:
             return False
         minute = now.hour * 60 + now.minute
         if self.start < self.end:
             return self.start <= minute < self.end
         return minute >= self.start or minute < self.end
 
-    def reply_text(self, now: datetime) -> str:
+    def reply_text(self) -> str:
         start = f"{self.start // 60:02d}:{self.start % 60:02d}"
         end = f"{self.end // 60:02d}:{self.end % 60:02d}"
-        rest_day = self._start_day(now)
-        next_days = next(
-            days
-            for days in range(1, 8)
-            if (rest_day.weekday() + days) % 7 in self.weekdays
-        )
-        # Relative labels are measured from this rest window's end date.
-        work_days = next_days - int(self.start > self.end)
-        if work_days == 0:
-            work_end = start
-        elif work_days == 1:
-            work_end = "次日" + start
-        else:
-            next_day = rest_day + timedelta(days=next_days)
-            work_end = (
-                f"{next_day.isoformat()}（{REST_WEEKDAYS[next_day.weekday()]}）{start}"
-            )
         values = {
-            "rest_start": start,
-            "rest_end": end,
-            "work_start": end,
-            "work_end": work_end,
+            "rest_start": end,
+            "rest_end": start,
+            "work_start": start,
+            "work_end": end,
+            "work_days": "每天"
+            if len(self.weekdays) == 7
+            else "、".join(REST_WEEKDAYS[day] for day in sorted(self.weekdays)),
         }
         text = self.reply
         for key, value in values.items():
@@ -136,7 +120,7 @@ class AccessGatePlugin(Star):
     def _load_rest_rules(self) -> tuple[GroupRestRule, ...]:
         raw = self.config.get("group_rest_rules", [])
         if not isinstance(raw, list):
-            logger.error("[access_gate] 群聊休息规则必须是列表，已忽略")
+            logger.error("[access_gate] 群聊开放规则必须是列表，已忽略")
             return ()
         rules: list[GroupRestRule] = []
         for index, item in enumerate(raw, start=1):
@@ -149,7 +133,7 @@ class AccessGatePlugin(Star):
                 start = self._rest_minute(item.get("start", DEFAULT_REST_START))
                 end = self._rest_minute(item.get("end", DEFAULT_REST_END))
                 if start == end:
-                    raise ValueError("休息开始与结束时间不能相同")
+                    raise ValueError("开放开始与结束时间不能相同")
                 reply = item.get("reply", DEFAULT_REST_REPLY)
                 if not isinstance(reply, str):
                     raise TypeError("休息回复内容必须是文字")
@@ -161,7 +145,7 @@ class AccessGatePlugin(Star):
                 rules.append(GroupRestRule(group_id, start, end, reply, weekdays))
             except (TypeError, ValueError) as exc:
                 logger.error(
-                    f"[access_gate] 第 {index} 条群聊休息规则无效，已忽略：{exc}"
+                    f"[access_gate] 第 {index} 条群聊开放规则无效，已忽略：{exc}"
                 )
         return tuple(rules)
 
@@ -242,16 +226,12 @@ class AccessGatePlugin(Star):
             return
         now = self._now()
         identifiers = self._event_identifiers(event, private=False)
-        rule = next(
-            (
-                rule
-                for rule in self.rest_rules
-                if rule.group_id in identifiers and rule.is_active(now)
-            ),
-            None,
-        )
-        if rule is None:
+        rules = [rule for rule in self.rest_rules if rule.group_id in identifiers]
+        # Each rule is a weekday/time intersection; all windows for this group
+        # are alternatives. An unmatched group remains unrestricted.
+        if not rules or any(rule.is_active(now) for rule in rules):
             return
+        rule = rules[0]
         # Commands may continue to their handlers, including explicit LLM
         # requests, but must never fall back to the default chat Agent.
         event.should_call_llm(True)
@@ -261,7 +241,7 @@ class AccessGatePlugin(Star):
         # Freeze the decision and reply before sending, then stop all other
         # handlers for this non-command event.
         self_id = str(event.get_self_id() or "")
-        reply = rule.reply_text(now) if self._at_self(event) else None
+        reply = rule.reply_text() if self._at_self(event) else None
         event.is_at_or_wake_command = False
         event.stop_event()
         if self_id and str(event.get_sender_id()) == self_id:
@@ -486,7 +466,7 @@ class AccessGatePlugin(Star):
                 f"\n插件唤醒：{self._bool('wake_enabled', True)}"
                 f"，唤醒词：{', '.join(sorted(self._entries('wake_names', ('可可子',))))}"
                 f"，提及判断：{self._bool('mention_judge_enabled', True)}"
-                f"\n群聊休息：{'开启' if self._bool('group_rest_enabled', True) else '关闭'}"
+                f"\n群聊开放时段：{'开启' if self._bool('group_rest_enabled', True) else '关闭'}"
                 f"，{len(self.rest_rules)} 条有效规则（北京时间）"
             )
             return

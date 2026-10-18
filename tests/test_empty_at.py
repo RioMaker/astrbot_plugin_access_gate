@@ -9,7 +9,7 @@ from test_wake import At, Context, Image, Plain, Reply
 
 
 class EmptyAtTests(unittest.TestCase):
-    def dispatch(self, chain, *, config=None, gate_only=False, parsed=None):
+    def dispatch(self, chain, *, config=None, gate_only=False, parsed=None, hour=20):
         context = Context('{"should_reply":true}', {})
         plugin = main.AccessGatePlugin(
             context,
@@ -27,7 +27,7 @@ class EmptyAtTests(unittest.TestCase):
             if not event.is_stopped() and not gate_only:
                 await plugin.route_wake(event)
 
-        now = datetime(2026, 10, 13, 10, tzinfo=main.REST_TIMEZONE)
+        now = datetime(2026, 10, 13, hour, tzinfo=main.REST_TIMEZONE)
         with patch.object(plugin, "_now", return_value=now):
             asyncio.run(run())
         return event, context
@@ -78,7 +78,7 @@ class EmptyAtTests(unittest.TestCase):
             config={"group_rest_rules": [{"group_id": "20001"}]},
         )
         self.assert_no_agent(event, context)
-        self.assertEqual(event.sent, ["休息ing，工作时间：16:00-次日08:00"])
+        self.assertEqual(event.sent, ["休息ing，工作时间：08:00-16:00"])
 
     def test_real_text_image_and_quoted_content_keep_normal_wake(self):
         for chain in (
@@ -113,7 +113,35 @@ class EmptyAtTests(unittest.TestCase):
                     config={"group_rest_rules": [{"group_id": "20001"}], **config},
                 )
                 self.assert_no_agent(event, context)
-                self.assertEqual(event.sent, ["休息ing，工作时间：16:00-次日08:00"])
+                self.assertEqual(event.sent, ["休息ing，工作时间：08:00-16:00"])
+
+    def test_open_window_keeps_empty_at_prompt_and_allows_informative_at(self):
+        rules = [{"group_id": "20001", "weekdays": ["星期二"]}]
+        event, context = self.dispatch(
+            [At()], hour=10, config={"group_rest_rules": rules}
+        )
+        self.assert_no_agent(event, context)
+        self.assertEqual(event.sent, ["我在，请继续说。"])
+
+        event, context = self.dispatch(
+            [At(), Plain("你好")], hour=10, config={"group_rest_rules": rules}
+        )
+        self.assertFalse(event.is_stopped())
+        self.assertFalse(event.call_llm)
+        self.assertTrue(event.is_at_or_wake_command)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(context.calls, [])
+
+    def test_unselected_weekday_still_blocks_empty_at_inside_time_window(self):
+        event, context = self.dispatch(
+            [At()],
+            hour=10,
+            config={
+                "group_rest_rules": [{"group_id": "20001", "weekdays": ["星期三"]}]
+            },
+        )
+        self.assert_no_agent(event, context)
+        self.assertEqual(event.sent, ["休息ing，工作时间：08:00-16:00"])
 
     def test_at_command_remains_available_during_rest(self):
         event, context = self.dispatch(

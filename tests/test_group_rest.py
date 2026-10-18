@@ -36,7 +36,7 @@ class GroupRestTests(unittest.TestCase):
         return {"group_id": "20001", **fields}
 
     def run_event(
-        self, event=None, *, hour=10, minute=0, now=None, config=None, route_only=False
+        self, event=None, *, hour=20, minute=0, now=None, config=None, route_only=False
     ):
         context = Context('{"should_reply":true}', {})
         settings = {
@@ -59,12 +59,12 @@ class GroupRestTests(unittest.TestCase):
             asyncio.run(dispatch())
         return event, context, plugin
 
-    def test_default_schedule_boundaries(self):
+    def test_default_open_schedule_boundaries(self):
         for hour, minute, resting in (
-            (7, 59, False),
-            (8, 0, True),
-            (15, 59, True),
-            (16, 0, False),
+            (7, 59, True),
+            (8, 0, False),
+            (15, 59, False),
+            (16, 0, True),
         ):
             with self.subTest(hour=hour, minute=minute):
                 event = GroupEvent()
@@ -73,7 +73,7 @@ class GroupRestTests(unittest.TestCase):
                 self.assertEqual(event.is_stopped(), resting)
                 self.assertEqual(
                     event.sent,
-                    ["休息ing，工作时间：16:00-次日08:00"] if resting else [],
+                    ["休息ing，工作时间：08:00-16:00"] if resting else [],
                 )
                 self.assertEqual(context.calls, [])
                 self.assertEqual(event.is_at_or_wake_command, not resting)
@@ -82,12 +82,12 @@ class GroupRestTests(unittest.TestCase):
     def test_cross_midnight_boundaries(self):
         rules = [self.rule(start="22:00", end="06:00")]
         for hour, minute, resting in (
-            (21, 59, False),
-            (22, 0, True),
-            (23, 59, True),
-            (0, 0, True),
-            (5, 59, True),
-            (6, 0, False),
+            (21, 59, True),
+            (22, 0, False),
+            (23, 59, False),
+            (0, 0, False),
+            (5, 59, False),
+            (6, 0, True),
         ):
             with self.subTest(hour=hour, minute=minute):
                 event = GroupEvent()
@@ -97,7 +97,7 @@ class GroupRestTests(unittest.TestCase):
                 )
                 self.assertEqual(event.is_stopped(), resting)
                 self.assertEqual(
-                    event.sent, ["休息ing，工作时间：06:00-22:00"] if resting else []
+                    event.sent, ["休息ing，工作时间：22:00-06:00"] if resting else []
                 )
 
     def test_weekday_selection_supports_each_single_day_multiple_days_and_all_days(
@@ -116,37 +116,66 @@ class GroupRestTests(unittest.TestCase):
                         now=now,
                         config={"group_rest_rules": [self.rule(weekdays=selected)]},
                     )
-                    resting = day in selected
+                    resting = day not in selected
                     self.assertEqual(event.is_stopped(), resting)
                     self.assertEqual(event.call_llm, resting)
                     self.assertEqual(event.is_at_or_wake_command, not resting)
                     self.assertEqual(event.sent, [])
                     self.assertEqual(context.calls, [])
 
-    def test_missing_weekdays_keeps_legacy_daily_rules(self):
+    def test_missing_weekdays_opens_the_time_window_every_day(self):
         for offset in range(7):
             with self.subTest(weekday=offset):
                 now = datetime(2026, 10, 5 + offset, 10, tzinfo=main.REST_TIMEZONE)
                 event, _, plugin = self.run_event(now=now)
-                self.assertTrue(event.is_stopped())
+                self.assertFalse(event.is_stopped())
                 self.assertEqual(plugin.rest_rules[0].weekdays, frozenset(range(7)))
 
-    def test_cross_midnight_weekdays_belong_to_start_day_including_sunday(self):
+    def test_weekday_and_time_must_both_match_to_open(self):
+        rules = [self.rule(weekdays=["星期五"], start="08:00", end="16:00")]
+        for day, hour, resting in (
+            (9, 10, False),
+            (9, 20, True),
+            (10, 10, True),
+            (10, 20, True),
+        ):
+            for route_only in (False, True):
+                with self.subTest(day=day, hour=hour, route_only=route_only):
+                    event = GroupEvent()
+                    event.message_obj.message.insert(0, At())
+                    event.is_at_or_wake_command = True
+                    event, context, _ = self.run_event(
+                        event,
+                        now=datetime(2026, 10, day, hour, tzinfo=main.REST_TIMEZONE),
+                        config={"group_rest_rules": rules},
+                        route_only=route_only,
+                    )
+                    self.assertEqual(event.is_stopped(), resting)
+                    self.assertEqual(event.call_llm, resting)
+                    self.assertEqual(event.is_at_or_wake_command, not resting)
+                    self.assertEqual(
+                        event.sent,
+                        ["休息ing，工作时间：08:00-16:00"] if resting else [],
+                    )
+                    self.assertEqual(context.calls, [])
+
+    def test_cross_midnight_uses_current_weekday_including_sunday_to_monday(self):
         rules = [self.rule(weekdays=["星期五", "星期日"], start="22:00", end="06:00")]
         for day, hour, minute, resting in (
             (9, 5, 59, False),
-            (9, 21, 59, False),
-            (9, 22, 0, True),
-            (9, 23, 59, True),
+            (9, 6, 0, True),
+            (9, 21, 59, True),
+            (9, 22, 0, False),
+            (9, 23, 59, False),
             (10, 0, 0, True),
             (10, 5, 59, True),
-            (10, 6, 0, False),
-            (10, 22, 0, False),
+            (10, 6, 0, True),
+            (10, 22, 0, True),
             (11, 5, 59, False),
-            (11, 22, 0, True),
+            (11, 22, 0, False),
             (12, 0, 0, True),
             (12, 5, 59, True),
-            (12, 6, 0, False),
+            (12, 6, 0, True),
         ):
             with self.subTest(day=day, hour=hour, minute=minute):
                 event = GroupEvent()
@@ -200,50 +229,61 @@ class GroupRestTests(unittest.TestCase):
 
     def test_duplicate_weekdays_are_deduplicated(self):
         event, _, plugin = self.run_event(
+            hour=10,
             config={
                 "group_rest_rules": [self.rule(weekdays=["星期六", "星期二", "星期六"])]
-            }
+            },
         )
-        self.assertTrue(event.is_stopped())
+        self.assertFalse(event.is_stopped())
         self.assertIsInstance(plugin.rest_rules[0].weekdays, frozenset)
         self.assertEqual(plugin.rest_rules[0].weekdays, frozenset({1, 5}))
 
-    def test_first_rule_with_matching_time_but_wrong_weekday_is_skipped(self):
+    def test_later_matching_weekday_can_open_the_group(self):
         rules = [
-            self.rule(weekdays=["星期五"], reply="星期未命中"),
-            self.rule(weekdays=["星期六"], reply="首条生效"),
-            self.rule(weekdays=self.WEEKDAYS, reply="后续生效"),
+            self.rule(weekdays=["星期五"], reply="首条未开放"),
+            self.rule(weekdays=["星期六"], reply="后条开放"),
         ]
         event = GroupEvent()
         event.message_obj.message.insert(0, At())
-        event, _, _ = self.run_event(event, config={"group_rest_rules": rules})
-        self.assertEqual(event.sent, ["首条生效"])
+        event, context, _ = self.run_event(
+            event, hour=10, config={"group_rest_rules": rules}
+        )
+        self.assertFalse(event.is_stopped())
+        self.assertFalse(event.call_llm)
+        self.assertTrue(event.is_at_or_wake_command)
+        self.assertEqual(event.sent, [])
+        self.assertEqual(context.calls, [])
 
-    def test_work_end_uses_next_selected_weekday_relative_to_rest_end(self):
-        workdays = self.WEEKDAYS[:5]
-        for weekdays, start, end, day, hour, expected in (
-            (workdays, "08:00", "16:00", 9, 10, "16:00-2026-10-12（星期一）08:00"),
-            (workdays, "08:00", "16:00", 5, 10, "16:00-次日08:00"),
-            (["星期五"], "08:00", "16:00", 9, 10, "16:00-2026-10-16（星期五）08:00"),
-            (["星期五"], "22:00", "06:00", 9, 23, "06:00-2026-10-16（星期五）22:00"),
-            (["星期五"], "22:00", "06:00", 10, 5, "06:00-2026-10-16（星期五）22:00"),
-            (["星期五", "星期日"], "22:00", "06:00", 9, 23, "06:00-次日22:00"),
-            (["星期五", "星期六"], "22:00", "06:00", 9, 23, "06:00-22:00"),
-            (self.WEEKDAYS, "22:00", "06:00", 10, 5, "06:00-22:00"),
+    def test_work_placeholders_describe_configured_days_and_open_time(self):
+        for weekdays, start, end, expected in (
+            (
+                self.WEEKDAYS[:5],
+                "08:00",
+                "16:00",
+                "星期一、星期二、星期三、星期四、星期五 08:00-16:00",
+            ),
+            (["星期五"], "08:00", "16:00", "星期五 08:00-16:00"),
+            (["星期五"], "22:00", "06:00", "星期五 22:00-06:00"),
+            (
+                ["星期日", "星期五", "星期五"],
+                "22:00",
+                "06:00",
+                "星期五、星期日 22:00-06:00",
+            ),
+            (self.WEEKDAYS, "22:00", "06:00", "每天 22:00-06:00"),
         ):
-            with self.subTest(weekdays=weekdays, day=day, hour=hour):
+            with self.subTest(weekdays=weekdays, start=start, end=end):
                 event = GroupEvent()
                 event.message_obj.message.insert(0, At())
                 event, _, _ = self.run_event(
                     event,
-                    now=datetime(2026, 10, day, hour, tzinfo=main.REST_TIMEZONE),
                     config={
                         "group_rest_rules": [
                             self.rule(
                                 weekdays=weekdays,
                                 start=start,
                                 end=end,
-                                reply="{work_start}-{work_end}",
+                                reply="{work_days} {work_start}-{work_end}",
                             )
                         ]
                     },
@@ -252,9 +292,9 @@ class GroupRestTests(unittest.TestCase):
 
     def test_weekday_match_preserves_commands_wake_and_empty_at_policy(self):
         rules = [self.rule(weekdays=self.WEEKDAYS[:5])]
-        for day, resting in ((9, True), (10, False)):
+        for day, hour, resting in ((9, 10, False), (9, 20, True), (10, 10, True)):
             for kind in ("command", "core_command", "name", "mention", "empty_at"):
-                with self.subTest(day=day, kind=kind):
+                with self.subTest(day=day, hour=hour, kind=kind):
                     text = {
                         "command": "/unknown_command",
                         "core_command": "help",
@@ -270,7 +310,7 @@ class GroupRestTests(unittest.TestCase):
                         event.extras["handlers_parsed_params"] = {"plugin.help": {}}
                     event, context, _ = self.run_event(
                         event,
-                        now=datetime(2026, 10, day, 10, tzinfo=main.REST_TIMEZONE),
+                        now=datetime(2026, 10, day, hour, tzinfo=main.REST_TIMEZONE),
                         config={"group_rest_rules": rules},
                     )
                     if kind in {"command", "core_command"}:
@@ -283,7 +323,7 @@ class GroupRestTests(unittest.TestCase):
                         self.assertFalse(event.is_at_or_wake_command)
                         self.assertEqual(
                             event.sent,
-                            ["休息ing，工作时间：16:00-2026-10-12（星期一）08:00"]
+                            ["休息ing，工作时间：08:00-16:00"]
                             if resting
                             else ["我在，请继续说。"],
                         )
@@ -297,7 +337,7 @@ class GroupRestTests(unittest.TestCase):
                     )
 
     def test_weekday_switches_at_beijing_midnight_on_a_utc_host(self):
-        for minute, resting in ((59, False), (0, True)):
+        for minute, resting in ((59, True), (0, False)):
             instant = datetime(
                 2026, 10, 11, 15 if minute else 16, minute, tzinfo=timezone.utc
             )
@@ -406,7 +446,7 @@ class GroupRestTests(unittest.TestCase):
                     self.assertTrue(event.is_stopped())
                     self.assertTrue(event.call_llm)
                     self.assertFalse(event.is_at_or_wake_command)
-                    self.assertEqual(event.sent, ["休息ing，工作时间：16:00-次日08:00"])
+                    self.assertEqual(event.sent, ["休息ing，工作时间：08:00-16:00"])
                     self.assertEqual(context.calls, [])
 
     def test_core_quote_wake_is_cleared_without_reply(self):
@@ -465,7 +505,7 @@ class GroupRestTests(unittest.TestCase):
         event.message_obj.message.insert(0, At())
         event, _, _ = self.run_event(event, config={"group_whitelist": []})
         self.assertTrue(event.is_stopped())
-        self.assertEqual(event.sent, ["休息ing，工作时间：16:00-次日08:00"])
+        self.assertEqual(event.sent, ["休息ing，工作时间：08:00-16:00"])
 
     def test_management_command_is_available_during_rest(self):
         event = GroupEvent("/accessgate status")
@@ -481,10 +521,10 @@ class GroupRestTests(unittest.TestCase):
                 await plugin.enforce_access(event)
             return results
 
-        now = datetime(2026, 10, 10, 10, tzinfo=main.REST_TIMEZONE)
+        now = datetime(2026, 10, 10, 20, tzinfo=main.REST_TIMEZONE)
         with patch.object(plugin, "_now", return_value=now):
             results = asyncio.run(dispatch())
-        self.assertIn("群聊休息：开启，1 条有效规则（北京时间）", results[0])
+        self.assertIn("群聊开放时段：开启，1 条有效规则（北京时间）", results[0])
         self.assertTrue(event.is_stopped())
         self.assertEqual(context.calls, [])
 
@@ -510,16 +550,24 @@ class GroupRestTests(unittest.TestCase):
                         event, config=config, route_only=route_only
                     )
                     self.assertTrue(event.is_stopped())
-                    self.assertEqual(event.sent, ["休息ing，工作时间：16:00-次日08:00"])
+                    self.assertEqual(event.sent, ["休息ing，工作时间：08:00-16:00"])
                     self.assertEqual(context.calls, [])
 
     def test_group_umo_rule(self):
-        event = GroupEvent()
-        event.message_obj.message.insert(0, At())
-        rules = [self.rule(group_id=event.unified_msg_origin)]
-        event, _, _ = self.run_event(event, config={"group_rest_rules": rules})
-        self.assertTrue(event.is_stopped())
-        self.assertEqual(len(event.sent), 1)
+        rules = [self.rule(group_id="aiocqhttp:GroupMessage:20001")]
+        for platform, hour, resting in (
+            ("aiocqhttp", 10, False),
+            ("aiocqhttp", 20, True),
+            ("other-platform", 20, False),
+        ):
+            with self.subTest(platform=platform, hour=hour):
+                event = GroupEvent(platform=platform)
+                event.message_obj.message.insert(0, At())
+                event, _, _ = self.run_event(
+                    event, hour=hour, config={"group_rest_rules": rules}
+                )
+                self.assertEqual(event.is_stopped(), resting)
+                self.assertEqual(len(event.sent), int(resting))
 
     def test_different_groups_can_have_different_times_and_content(self):
         rules = [
@@ -528,28 +576,87 @@ class GroupRestTests(unittest.TestCase):
                 group_id="20002",
                 start="09:30",
                 end="17:30",
-                reply="第二群工作时间 17:30-09:30",
+                reply="第二群工作时间 09:30-17:30",
             ),
         ]
         for group_id, reply in (
             ("20001", "第一群休息"),
-            ("20002", "第二群工作时间 17:30-09:30"),
+            ("20002", "第二群工作时间 09:30-17:30"),
         ):
             event = GroupEvent(group_id=group_id)
             event.message_obj.message.insert(0, At())
             event, _, _ = self.run_event(event, config={"group_rest_rules": rules})
             self.assertEqual(event.sent, [reply])
+        for group_id, resting in (("20001", True), ("20002", False)):
+            with self.subTest(group_id=group_id):
+                event = GroupEvent(group_id=group_id)
+                event.message_obj.message.insert(0, At())
+                event, _, _ = self.run_event(
+                    event, hour=16, minute=30, config={"group_rest_rules": rules}
+                )
+                self.assertEqual(event.is_stopped(), resting)
 
-    def test_first_active_rule_wins(self):
+    def test_any_matching_window_opens_and_closed_window_uses_first_group_reply(self):
         rules = [
-            self.rule(start="00:00", end="01:00", reply="未生效"),
-            self.rule(reply="首条生效"),
-            self.rule(reply="后续生效"),
+            self.rule(group_id="20002", reply="不相关的群"),
+            self.rule(start="08:00", end="12:00", reply="首条群规则"),
+            self.rule(start="11:00", end="16:00", reply="第二条群规则"),
+        ]
+        for hour, resting in (
+            (7, True),
+            (8, False),
+            (11, False),
+            (12, False),
+            (15, False),
+            (16, True),
+        ):
+            with self.subTest(hour=hour):
+                event = GroupEvent()
+                event.message_obj.message.insert(0, At())
+                event, context, _ = self.run_event(
+                    event, hour=hour, config={"group_rest_rules": rules}
+                )
+                self.assertEqual(event.is_stopped(), resting)
+                self.assertEqual(event.call_llm, resting)
+                self.assertEqual(event.sent, ["首条群规则"] if resting else [])
+                self.assertEqual(context.calls, [])
+
+    def test_separate_windows_must_not_combine_their_weekdays_and_times(self):
+        rules = [
+            self.rule(
+                weekdays=["星期五"], start="08:00", end="12:00", reply="首条群规则"
+            ),
+            self.rule(
+                weekdays=["星期六"], start="14:00", end="18:00", reply="后条群规则"
+            ),
+        ]
+        for day, hour, resting in (
+            (9, 10, False),
+            (9, 15, True),
+            (10, 10, True),
+            (10, 15, False),
+        ):
+            with self.subTest(day=day, hour=hour):
+                event = GroupEvent()
+                event.message_obj.message.insert(0, At())
+                event, _, _ = self.run_event(
+                    event,
+                    now=datetime(2026, 10, day, hour, tzinfo=main.REST_TIMEZONE),
+                    config={"group_rest_rules": rules},
+                )
+                self.assertEqual(event.is_stopped(), resting)
+                self.assertEqual(event.sent, ["首条群规则"] if resting else [])
+
+    def test_other_group_open_window_cannot_open_the_restricted_group(self):
+        rules = [
+            self.rule(group_id="20002", start="18:00", end="23:00"),
+            self.rule(reply="当前群未开放"),
         ]
         event = GroupEvent()
         event.message_obj.message.insert(0, At())
         event, _, _ = self.run_event(event, config={"group_rest_rules": rules})
-        self.assertEqual(event.sent, ["首条生效"])
+        self.assertTrue(event.is_stopped())
+        self.assertEqual(event.sent, ["当前群未开放"])
 
     def test_custom_reply_placeholders_and_literal_braces(self):
         rules = [
@@ -560,7 +667,7 @@ class GroupRestTests(unittest.TestCase):
         event = GroupEvent()
         event.message_obj.message.insert(0, At())
         event, _, _ = self.run_event(event, config={"group_rest_rules": rules})
-        self.assertEqual(event.sent, ["休息 08:00~16:00；工作 16:00~次日08:00；{说明}"])
+        self.assertEqual(event.sent, ["休息 16:00~08:00；工作 08:00~16:00；{说明}"])
 
     def test_invalid_rules_do_not_block_and_do_not_hide_valid_rule(self):
         invalid = [

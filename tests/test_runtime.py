@@ -1,0 +1,546 @@
+"""Billing invariants against AstrBot-shaped interfaces, without model access."""
+
+import asyncio
+import inspect
+import sys
+import unittest
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from runtime import BillingRuntime, RuntimeGateDenied
+
+
+def reply(tokens=10, *, chunk=False):
+    return SimpleNamespace(
+        role="assistant",
+        is_chunk=chunk,
+        usage=SimpleNamespace(input_other=tokens, input_cached=20, output=3),
+        raw_completion=SimpleNamespace(
+            usage={"prompt_tokens": tokens + 20}, model="deepseek-flash"
+        ),
+    )
+
+
+class Event:
+    def __init__(self):
+        self.sent = []
+        self.stopped = False
+        self.extras = {}
+
+    def stop_event(self):
+        self.stopped = True
+
+    def get_sender_id(self):
+        return "10001"
+
+    def get_extra(self, key):
+        return self.extras.get(key)
+
+    def plain_result(self, text):
+        return text
+
+    async def send(self, text):
+        self.sent.append(text)
+
+
+class ProviderRequest:
+    pass
+
+
+class Provider:
+    def __init__(self):
+        self.requests = 0
+
+    async def text_chat(self, prompt=None, model=None, **kwargs):
+        self.requests += 1
+        return reply()
+
+    async def text_chat_stream(self, **kwargs):
+        yield reply(1, chunk=True)
+        yield await self.text_chat(**kwargs)
+
+
+class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.provider = Provider()
+        self.providers = [self.provider]
+        self.started = []
+        self.finished = []
+        self.event = Event()
+
+        class Scheduler:
+            async def execute(_, event):
+                return await event.action()
+
+        class Manager:
+            async def load_provider(_, provider):
+                self.providers.append(provider)
+
+        class HookRegistry(list):
+            def get_handlers_by_event_type(registry, event_type):
+                return [item for item in registry if item.event_type.name == event_type]
+
+        class AgentRequestStage:
+            async def process(_, event):
+                await self.provider.text_chat()
+                yield None
+
+        async def call_handler(event, handler, **kwargs):
+            result = handler(event, **kwargs)
+            if inspect.isasyncgen(result):
+                async for item in result:
+                    yield item
+            else:
+                yield await result
+
+        async def call_local_llm_tool(context, handler, method_name, **kwargs):
+            event = context.context.event
+            async for item in call_handler(event, handler, **kwargs):
+                yield item
+
+        self.scheduler = Scheduler()
+        self.manager = Manager()
+        self.handlers = ModuleType("star_request")
+        self.handlers.call_handler = call_handler
+        self.tool_exec = ModuleType("tool_exec")
+        self.tool_exec.call_local_llm_tool = call_local_llm_tool
+        scheduler_module = ModuleType("scheduler")
+        scheduler_module.PipelineScheduler = Scheduler
+        self.hooks = HookRegistry()
+        registry_module = ModuleType("star_handler")
+        registry_module.star_handlers_registry = self.hooks
+        request_stage_module = ModuleType("agent_request")
+        request_stage_module.AgentRequestSubStage = AgentRequestStage
+        request_entities = ModuleType("entities")
+        request_entities.ProviderRequest = ProviderRequest
+        self.agent_stage = AgentRequestStage()
+        modules = {
+            "astrbot.core.pipeline.scheduler": scheduler_module,
+            "astrbot.core.pipeline.process_stage.method.star_request": self.handlers,
+            "astrbot.core.astr_agent_tool_exec": self.tool_exec,
+            "astrbot.core.star.star_handler": registry_module,
+            "astrbot.core.pipeline.process_stage.method.agent_request": request_stage_module,
+            "astrbot.core.provider.entities": request_entities,
+        }
+        self.modules = patch.dict(sys.modules, modules)
+        self.modules.start()
+        self.stars = [
+            SimpleNamespace(
+                name="astrbot_plugin_liuyao", module_path="data.plugins.liuyao.main"
+            ),
+            SimpleNamespace(
+                name="astrbot_plugin_access_gate",
+                module_path="data.plugins.access_gate.main",
+            ),
+            SimpleNamespace(name="core", module_path="astrbot.builtin_stars.core.main"),
+        ]
+        self.context = SimpleNamespace(
+            get_all_providers=lambda: self.providers,
+            provider_manager=self.manager,
+            get_all_stars=lambda: self.stars,
+        )
+
+        async def begin(event, plugin, provider, kwargs):
+            ticket = len(self.started)
+            self.started.append((event, plugin, provider, kwargs))
+            return ticket
+
+        async def settle(ticket, response, failed):
+            self.finished.append((ticket, response, failed))
+
+        self.runtime = BillingRuntime(self.context, begin, settle)
+        self.assertTrue(self.runtime.install())
+
+    async def asyncTearDown(self):
+        self.runtime.uninstall()
+        await self.runtime.drain()
+        self.modules.stop()
+
+    async def test_main_chat_has_real_event_and_positional_options(self):
+        self.event.action = lambda: self.provider.text_chat("hello", "flash-alias")
+        response = await self.scheduler.execute(self.event)
+        self.assertIs(self.started[0][0], self.event)
+        self.assertEqual(self.started[0][1], "")
+        self.assertEqual(self.started[0][3]["model"], "flash-alias")
+        self.assertIs(self.finished[0][1], response)
+        self.assertFalse(self.finished[0][2])
+
+    async def test_plugin_commands_and_tools_use_plugin_scope(self):
+        async def command(event):
+            return await self.provider.text_chat()
+
+        command.__module__ = "data.plugins.liuyao.agent_analysis"
+        async for _ in self.handlers.call_handler(self.event, command):
+            pass
+        context = SimpleNamespace(context=SimpleNamespace(event=self.event))
+        async for _ in self.tool_exec.call_local_llm_tool(
+            context, command, "decorator_handler"
+        ):
+            pass
+        self.assertEqual(
+            [row[1] for row in self.started], ["astrbot_plugin_liuyao"] * 2
+        )
+        self.assertTrue(all(row[0] is self.event for row in self.started))
+        await self.provider.text_chat()
+        self.assertIsNone(self.started[-1][0])
+
+    async def test_gate_and_builtin_helpers_are_chat_not_exempt_plugin(self):
+        async def command(event):
+            return await self.provider.text_chat()
+
+        for module in (
+            "data.plugins.access_gate.main",
+            "astrbot.builtin_stars.core.main",
+        ):
+            command.__module__ = module
+            async for _ in self.handlers.call_handler(self.event, command):
+                pass
+        self.assertEqual([row[1] for row in self.started], ["", ""])
+
+    async def test_plugin_scope_does_not_leak_across_generator_yield(self):
+        async def command(event):
+            yield await self.provider.text_chat()
+            yield await self.provider.text_chat()
+
+        command.__module__ = "data.plugins.liuyao.main"
+        with self.runtime.billing_scope(self.event):
+            stream = self.handlers.call_handler(self.event, command)
+            await anext(stream)
+            await self.provider.text_chat()
+            await anext(stream)
+            await stream.aclose()
+        self.assertEqual(
+            [row[1] for row in self.started],
+            ["astrbot_plugin_liuyao", "", "astrbot_plugin_liuyao"],
+        )
+
+    async def test_deny_never_calls_provider_or_settles_and_notifies_once(self):
+        async def deny(*args):
+            raise RuntimeGateDenied("今日群额度已用完")
+
+        self.runtime.begin = deny
+        self.event.action = self.provider.text_chat
+        self.assertIsNone(await self.scheduler.execute(self.event))
+        self.assertEqual(self.provider.requests, 0)
+        self.assertEqual(self.finished, [])
+        self.assertTrue(self.event.stopped)
+        self.assertEqual(self.event.sent, ["今日群额度已用完"])
+
+    async def test_unknown_calls_reach_begin_and_can_be_denied(self):
+        async def reject_unknown(event, *args):
+            self.assertIsNone(event)
+            raise RuntimeGateDenied("后台调用未绑定归属")
+
+        self.runtime.begin = reject_unknown
+        with self.assertRaises(RuntimeGateDenied):
+            await self.provider.text_chat()
+        self.assertEqual(self.provider.requests, 0)
+
+    async def test_finished_event_is_not_inherited_by_delayed_child(self):
+        release = asyncio.Event()
+
+        async def child():
+            await release.wait()
+            await self.provider.text_chat()
+
+        with self.runtime.billing_scope(self.event, "astrbot_plugin_liuyao"):
+            task = asyncio.create_task(child())
+        release.set()
+        await task
+        self.assertIsNone(self.started[0][0])
+        self.assertEqual(self.started[0][1], "")
+
+    async def test_child_task_using_same_provider_is_a_separate_bill(self):
+        provider = Provider()
+        base = provider.text_chat
+
+        async def delegated(prompt=None, **kwargs):
+            if prompt == "outer":
+                await asyncio.create_task(provider.text_chat("child"))
+            return await base(prompt, **kwargs)
+
+        provider.text_chat = delegated
+        await self.manager.load_provider(provider)
+        with self.runtime.billing_scope(self.event):
+            await provider.text_chat("outer")
+        self.assertEqual(len(self.started), 2)
+        self.assertEqual(len(self.finished), 2)
+
+    async def test_same_task_nested_provider_calls_settle_once(self):
+        with self.runtime.billing_scope(self.event):
+            outputs = [response async for response in self.provider.text_chat_stream()]
+        self.assertEqual(len(outputs), 2)
+        self.assertEqual(len(self.started), 1)
+        self.assertEqual(len(self.finished), 1)
+        self.assertEqual(self.finished[0][1].usage.input_other, 10)
+
+    async def test_stream_anext_in_different_tasks_still_has_no_nested_double_charge(
+        self,
+    ):
+        with self.runtime.billing_scope(self.event):
+            stream = self.provider.text_chat_stream()
+            await asyncio.create_task(anext(stream))
+            await asyncio.create_task(anext(stream))
+            with self.assertRaises(StopAsyncIteration):
+                await asyncio.create_task(anext(stream))
+        self.assertEqual(len(self.started), 1)
+        self.assertEqual(len(self.finished), 1)
+
+    async def test_stream_snapshot_does_not_change_when_caller_mutates_response(self):
+        with self.runtime.billing_scope(self.event):
+            stream = self.provider.text_chat_stream()
+            await anext(stream)
+            final = await anext(stream)
+            final.usage.input_other = 99999
+            final.raw_completion.usage["prompt_tokens"] = 99999
+            with self.assertRaises(StopAsyncIteration):
+                await anext(stream)
+        saved = self.finished[0][1]
+        self.assertEqual(saved.usage.input_other, 10)
+        self.assertEqual(saved.raw_completion.usage["prompt_tokens"], 30)
+
+    async def test_stream_early_close_marks_unknown_usage_failed(self):
+        with self.runtime.billing_scope(self.event):
+            stream = self.provider.text_chat_stream()
+            await anext(stream)
+            await stream.aclose()
+        self.assertEqual(len(self.finished), 1)
+        self.assertIsNone(self.finished[0][1])
+        self.assertTrue(self.finished[0][2])
+
+    async def test_exception_and_cancellation_each_settle_once(self):
+        provider = Provider()
+
+        async def fails(**kwargs):
+            raise ValueError("upstream")
+
+        provider.text_chat = fails
+        await self.manager.load_provider(provider)
+        with self.assertRaises(ValueError):
+            await provider.text_chat()
+        entered = asyncio.Event()
+
+        async def pending(**kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        provider.text_chat = pending
+        self.runtime.refresh()
+        task = asyncio.create_task(provider.text_chat())
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(len(self.finished), 2)
+        self.assertTrue(all(row[2] for row in self.finished))
+
+    async def test_uninstall_preserves_inflight_settlement_but_stops_new_billing(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        provider = Provider()
+
+        async def pending(**kwargs):
+            entered.set()
+            await release.wait()
+            return reply()
+
+        provider.text_chat = pending
+        await self.manager.load_provider(provider)
+        task = asyncio.create_task(provider.text_chat())
+        await entered.wait()
+        self.runtime.uninstall()
+        release.set()
+        await task
+        await self.provider.text_chat()
+        self.assertEqual(len(self.started), 1)
+        self.assertEqual(len(self.finished), 1)
+
+    async def test_second_cancel_does_not_cancel_owned_settlement(self):
+        settling, release = asyncio.Event(), asyncio.Event()
+
+        async def settle(ticket, response, failed):
+            settling.set()
+            await release.wait()
+            self.finished.append((ticket, response, failed))
+
+        self.runtime.settle = settle
+        task = asyncio.create_task(self.provider.text_chat())
+        await settling.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(self.runtime.status()["pending_settlements"], 1)
+        self.runtime.uninstall()
+        release.set()
+        await self.runtime.drain()
+        self.assertEqual(len(self.finished), 1)
+
+    async def test_hotloaded_instance_override_is_guarded_before_first_call(self):
+        provider = Provider()
+        original = provider.text_chat
+
+        async def override(**kwargs):
+            return await original(**kwargs)
+
+        provider.text_chat = override
+        await self.manager.load_provider(provider)
+        await provider.text_chat()
+        self.assertIs(self.started[0][2], provider)
+
+    async def test_incompatible_methods_close_all_model_paths(self):
+        provider = Provider()
+        provider.text_chat_stream = lambda **kwargs: None
+        await self.manager.load_provider(provider)
+        self.assertFalse(self.runtime.status()["complete"])
+        self.assertIn("text_chat_stream", self.runtime.status()["errors"][0])
+        with self.assertRaises(RuntimeGateDenied):
+            await anext(provider.text_chat_stream())
+        with self.assertRaises(RuntimeGateDenied):
+            await provider.text_chat()
+        with self.assertRaises(RuntimeGateDenied):
+            await self.provider.text_chat()
+        self.assertEqual(len(self.finished), 0)
+        self.assertEqual(provider.requests, 0)
+
+    async def test_installation_failure_keeps_providers_and_loading_closed(self):
+        self.runtime.uninstall()
+        self.handlers.call_handler = lambda *args, **kwargs: None
+        self.assertFalse(self.runtime.install())
+        self.assertTrue(self.runtime.status()["installed"])
+        self.assertFalse(self.runtime.status()["complete"])
+        with self.assertRaises(RuntimeGateDenied):
+            await self.provider.text_chat()
+        with self.assertRaises(RuntimeGateDenied):
+            await anext(self.provider.text_chat_stream())
+        with self.assertRaises(RuntimeGateDenied):
+            await self.manager.load_provider(Provider())
+        self.assertEqual(self.provider.requests, 0)
+        self.assertEqual(len(self.providers), 1)
+        self.assertEqual(self.finished, [])
+
+    async def test_reinstall_does_not_reactivate_old_wrapper(self):
+        old_wrapper = self.provider.text_chat
+        self.runtime.uninstall()
+        self.assertTrue(self.runtime.install())
+        await old_wrapper()
+        self.assertEqual(len(self.started), 0)
+        await self.provider.text_chat()
+        self.assertEqual(len(self.started), 1)
+
+    async def test_hotloaded_hook_is_exempt_and_restores_main_chat_scope(self):
+        async def hook(event):
+            # Child tasks inherit the hook's identity, including wait_for calls.
+            await asyncio.wait_for(self.provider.text_chat(), timeout=1)
+
+        hook.__module__ = "data.plugins.liuyao.main"
+        self.hooks.append(
+            SimpleNamespace(
+                event_type=SimpleNamespace(name="OnLLMResponseEvent"), handler=hook
+            )
+        )
+
+        async def action():
+            for metadata in self.hooks.get_handlers_by_event_type("OnLLMResponseEvent"):
+                await metadata.handler(self.event)
+            await self.provider.text_chat()
+
+        self.event.action = action
+        await self.scheduler.execute(self.event)
+        self.assertEqual(
+            [row[1] for row in self.started], ["astrbot_plugin_liuyao", ""]
+        )
+        self.assertTrue(all(row[0] is self.event for row in self.started))
+
+    async def test_generator_hook_scope_is_reset_between_yields(self):
+        async def hook(event):
+            yield await self.provider.text_chat()
+            yield await self.provider.text_chat()
+
+        hook.__module__ = "data.plugins.liuyao.main"
+        self.hooks.append(
+            SimpleNamespace(
+                event_type=SimpleNamespace(name="OnCallingFuncToolEvent"), handler=hook
+            )
+        )
+        metadata = self.hooks.get_handlers_by_event_type("OnCallingFuncToolEvent")[0]
+        with self.runtime.billing_scope(self.event):
+            iterator = metadata.handler(self.event)
+            await anext(iterator)
+            await self.provider.text_chat()
+            await anext(iterator)
+            await iterator.aclose()
+        self.assertEqual(
+            [row[1] for row in self.started],
+            ["astrbot_plugin_liuyao", "", "astrbot_plugin_liuyao"],
+        )
+
+    async def test_lifecycle_hook_does_not_borrow_an_unrelated_message_identity(self):
+        async def hook(metadata):
+            await self.provider.text_chat()
+
+        hook.__module__ = "data.plugins.liuyao.main"
+        self.hooks.append(
+            SimpleNamespace(
+                event_type=SimpleNamespace(name="OnPluginLoadedEvent"), handler=hook
+            )
+        )
+        metadata = self.hooks.get_handlers_by_event_type("OnPluginLoadedEvent")[0]
+        with self.runtime.billing_scope(self.event):
+            await metadata.handler(SimpleNamespace(name="some_plugin"))
+        self.assertIsNone(self.started[0][0])
+        self.assertEqual(self.started[0][1], "astrbot_plugin_liuyao")
+
+    async def test_legacy_plugin_request_exempts_only_its_own_agent_run(self):
+        async def command(event):
+            yield ProviderRequest()
+
+        command.__module__ = "data.plugins.liuyao.main"
+
+        async def action():
+            async for request in self.handlers.call_handler(self.event, command):
+                self.event.extras["provider_request"] = request
+                async for _ in self.agent_stage.process(self.event):
+                    # Work after a yielded Agent result is not plugin work.
+                    await self.provider.text_chat()
+            # Even if Core keeps the old request in extras, its consumed origin
+            # must not exempt an ordinary chat run that follows the command.
+            async for _ in self.agent_stage.process(self.event):
+                pass
+
+        self.event.action = action
+        await self.scheduler.execute(self.event)
+        self.assertEqual(
+            [row[1] for row in self.started], ["astrbot_plugin_liuyao", "", ""]
+        )
+        self.assertTrue(all(row[0] is self.event for row in self.started))
+
+    async def test_legacy_request_origin_cannot_transfer_to_another_event(self):
+        async def command(event):
+            yield ProviderRequest()
+
+        command.__module__ = "data.plugins.liuyao.main"
+        other_event = Event()
+        stream = self.handlers.call_handler(self.event, command)
+        other_event.extras["provider_request"] = await anext(stream)
+        async for _ in self.agent_stage.process(other_event):
+            pass
+        await stream.aclose()
+        self.assertEqual(self.started[0][1], "")
+        self.assertIs(self.started[0][0], other_event)
+
+    async def test_abandoned_legacy_request_does_not_retain_plugin_exemption(self):
+        async def command(event):
+            yield ProviderRequest()
+
+        command.__module__ = "data.plugins.liuyao.main"
+        stream = self.handlers.call_handler(self.event, command)
+        self.event.extras["provider_request"] = await anext(stream)
+        await stream.aclose()
+        async for _ in self.agent_stage.process(self.event):
+            pass
+        self.assertEqual(self.started[0][1], "")
+
+
+if __name__ == "__main__":
+    unittest.main()

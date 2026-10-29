@@ -16,8 +16,8 @@ from astrbot.core.star.filter.command import GreedyStr
 
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
-PLUGIN_DESC = "独立群聊/私聊白名单、插件唤醒与指定群聊开放时段"
-PLUGIN_VERSION = "1.4.0"
+PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
+PLUGIN_VERSION = "2.0.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -94,8 +94,113 @@ class AccessGatePlugin(Star):
             fallback_config if fallback_config is not None else {}
         )
         self.rest_rules = self._load_rest_rules()
+        self.economy = None
+        self.billing_runtime = None
+        self.rp_bridge = None
+        self.admin_api = None
         logger.info(
             "[access_gate] 已加载；请确保 AstrBot 核心 enable_id_white_list 已关闭"
+        )
+
+    async def initialize(self):
+        from pathlib import Path
+
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+        from .admin_api import AdminAPI
+        from .economy import Economy
+        from .rp_bridge import RPBridge
+        from .runtime import BillingRuntime
+
+        directory = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
+        directory.mkdir(parents=True, exist_ok=True)
+        self.economy = await asyncio.to_thread(Economy, directory / "credits.db")
+        self.billing_runtime = BillingRuntime(
+            self.context,
+            self._begin_credit_call,
+            self.economy.settle,
+            self._credit_error,
+        )
+        if self._bool("credits_enabled", True):
+            self.billing_runtime.install()
+        self.rp_bridge = RPBridge(self.context, self._award_rp, self._credit_error)
+        self.rp_bridge.install()
+        self.admin_api = AdminAPI(self)
+        self.admin_api.register()
+
+    @staticmethod
+    def _credit_error(message):
+        logger.error(f"[access_gate] {message}")
+
+    async def _begin_credit_call(self, event, plugin, provider, kwargs):
+        if not self._bool("credits_enabled", True):
+            return None
+        return await self.economy.begin(event, plugin, provider, kwargs)
+
+    async def _award_rp(self, event, record):
+        if self._bool("credits_enabled", True) and self.economy:
+            await self.economy.award(event, record)
+
+    def credit_status(self):
+        return {
+            "enabled": self._bool("credits_enabled", True),
+            "runtime": self.billing_runtime.status()
+            if self.billing_runtime
+            else {"installed": False},
+            "rp": self.rp_bridge.status() if self.rp_bridge else {"connected": False},
+            "storage_error": self.economy.fault if self.economy else "尚未初始化",
+            "coverage": "接管 AstrBot 管理的聊天 Provider。直接 HTTP/SDK 调用需单独适配；无有效用户/群归属的后台请求将拒绝。预留是估值，在途实际成本可能越过额度。",
+        }
+
+    def credit_plugins(self):
+        charged = (
+            set(self.economy._settings()["values"]["charged_plugins"])
+            if self.economy
+            else set()
+        )
+        result = []
+        for star in self.context.get_all_stars():
+            name = str(getattr(star, "name", "") or "")
+            if not name or name == PLUGIN_NAME or getattr(star, "reserved", False):
+                continue
+            result.append(
+                {
+                    "name": name,
+                    "display_name": str(getattr(star, "display_name", "") or name),
+                    "version": str(getattr(star, "version", "") or ""),
+                    "activated": bool(getattr(star, "activated", False)),
+                    "charged": name in charged,
+                }
+            )
+        return sorted(result, key=lambda item: item["name"])
+
+    async def terminate(self):
+        if self.admin_api:
+            self.admin_api.unregister()
+        if self.rp_bridge:
+            self.rp_bridge.uninstall()
+        if self.billing_runtime:
+            self.billing_runtime.uninstall()
+        # Existing requests retain callbacks until settlement. SQLite operations
+        # are short lived; do not close their shared connection during reload.
+
+    @filter.command("积分")
+    async def points_command(self, event: AstrMessageEvent):
+        """查看个人积分余额；通过 /rp 每日获得一次积分。"""
+        event.stop_event()
+        if not self.economy:
+            yield event.plain_result("积分系统尚未就绪。")
+            return
+        from .economy import identity
+
+        person = identity(event)
+        balance = await self.economy.balance(person["platform"], person["user_id"])
+        settings = (await self.economy.settings())["values"]
+        yield event.plain_result(
+            f"当前积分：{balance:g}\n"
+            f"按当前比例折合 ¥{balance / settings['points_per_yuan']:.6f}\n"
+            f"每日 /rp 奖励：{settings['rp_base_points']:g} + RP × {settings['rp_step_points']:g} 分。\n"
+            "余额大于 0 可发起对话，完成后按实际 token 成本扣分；余额可能扣为负数，补足后可继续。"
         )
 
     @staticmethod
@@ -349,7 +454,7 @@ class AccessGatePlugin(Star):
         try:
             save_config = getattr(self.config, "save_config", None)
             if not callable(save_config):
-                raise RuntimeError("当前配置对象不支持 save_config()")
+                raise RuntimeError("当前配置对象不支持 save_config()")  # noqa: TRY004 - host capability error
             save_config()
         except Exception:
             if had_key:
@@ -507,7 +612,7 @@ class AccessGatePlugin(Star):
         config_key, scope_label = target
         try:
             added, total = self._save_import(config_key, imported)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - host persistence errors are reported
             logger.error(f"[access_gate] 保存{scope_label}白名单失败：{exc}")
             yield event.plain_result(f"导入失败：配置未保存（{exc}）。")
             return
@@ -518,7 +623,28 @@ class AccessGatePlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=GATE_PRIORITY)
     async def enforce_access(self, event: AstrMessageEvent) -> None:
+        if self.rp_bridge:
+            self.rp_bridge.refresh()
         await self._enforce_access(event)
+        if event.is_stopped():
+            return
+        if (
+            self._bool("credits_enabled", True)
+            and self.billing_runtime
+            and not self.billing_runtime.status().get("complete")
+        ):
+            # A broken accounting boundary must never silently become free chat.
+            roots = {
+                self._root_command(text) for text in self._message_candidates(event)
+            }
+            if not roots.intersection({"rp", "积分", "accessgate"}):
+                event.stop_event()
+                await event.send(
+                    event.plain_result(
+                        "积分额度网关接入不完整，已暂停请求；请管理员查看积分管理页的接入状态。"
+                    )
+                )
+                return
         if not event.is_stopped():
             await self._enforce_group_rest(event)
         if not event.is_stopped():
@@ -628,7 +754,7 @@ class AccessGatePlugin(Star):
                 return
             try:
                 should_reply = await self._judge_mention(event, text)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - provider failures must suppress wake
                 logger.error(
                     f"[access_gate] 提及判断失败，保持沉默：{type(exc).__name__}"
                 )

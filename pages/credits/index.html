@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>积分与模型额度</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header>
+    <div><p class="eyebrow">ACCESS GATE · 管理中心</p><h1>积分与模型额度</h1><p class="muted">RP 获得积分，模型按实际用量结算。每日额度按北京时间重置。</p></div>
+    <button id="refresh" class="secondary" type="button">刷新数据</button>
+  </header>
+  <div id="message" role="status" aria-live="polite" hidden></div>
+  <nav aria-label="管理分区"><a href="#overview">额度总览</a><a href="#users">用户余额</a><a href="#ledger">历史流水</a><a href="#settings">计费设置</a><a href="#reconcile">用量核对</a></nav>
+  <main>
+    <section id="overview">
+      <div class="section-heading"><h2>今日额度</h2><span id="day" class="muted">等待连接 AstrBot</span></div>
+      <div id="summary" class="cards"></div>
+      <p class="hint">可用额度 = 每日上限 − 已结算金额 − 在途预占。插件免扣个人积分时，LLM 成本仍计入全局及所属群额度。</p>
+      <div class="table-wrap"><table><caption>各群额度</caption><thead><tr><th>平台 / 群号</th><th>额度来源</th><th>每日上限</th><th>已结算</th><th>预占</th><th>可用</th></tr></thead><tbody id="groups-body"></tbody></table></div>
+      <details><summary>关联与拦截状态</summary><pre id="integration">尚未加载</pre></details>
+    </section>
+    <section id="users">
+      <div class="section-heading"><h2>用户积分余额</h2><form id="user-search" class="inline"><label class="sr-only" for="user-query">搜索用户</label><input id="user-query" placeholder="搜索用户 ID 或昵称" maxlength="200"><button type="submit">搜索</button></form></div>
+      <div class="table-wrap"><table><thead><tr><th>平台</th><th>用户</th><th>积分</th><th>当前金额等值</th></tr></thead><tbody id="users-body"></tbody></table></div>
+      <div class="pagination"><button id="users-prev" type="button" class="secondary">上一页</button><span id="users-page"></span><button id="users-next" type="button" class="secondary">下一页</button></div>
+      <details><summary>管理员调整积分</summary><form id="adjust-form" class="form-grid">
+        <label>平台标识<input name="platform" required maxlength="100" placeholder="QQ 用户填写 qq"></label><label>用户 ID<input name="user_id" required maxlength="100"></label>
+        <label>调整积分（正数增加，负数扣除）<input name="delta" type="number" step="0.001" required></label><label>调整原因<input name="reason" required maxlength="200"></label>
+        <div class="form-action"><button type="submit">记录并调整</button><span class="hint">每次操作保留管理员和原因，失败重试沿用同一请求编号。</span></div>
+      </form></details>
+    </section>
+    <section id="ledger">
+      <h2>历史获得与消耗</h2>
+      <form id="ledger-filter" class="filters">
+        <label>用户 ID<input name="user_id" maxlength="200"></label><label>群号<input name="group_id" maxlength="200"></label><label>平台<input name="platform" maxlength="200"></label>
+        <label>类型<select name="kind"><option value="">全部类型</option><option value="rp">RP 获得</option><option value="consumption">LLM 消耗</option><option value="adjustment">管理员调整</option></select></label>
+        <label>状态<select name="status"><option value="">全部状态</option><option value="settled">已结算</option><option value="reserved">在途预占</option><option value="unknown">用量未知</option><option value="cancelled">已取消</option></select></label>
+        <label>北京日期<input name="day" type="date"></label><button type="submit">筛选</button>
+      </form>
+      <div class="table-wrap"><table><thead><tr><th>北京时间</th><th>用户 / 群</th><th>来源 / 类型</th><th>积分变动</th><th>核算金额</th><th>Token 数</th><th>状态与快照</th></tr></thead><tbody id="ledger-body"></tbody></table></div>
+      <div class="pagination"><button id="ledger-prev" type="button" class="secondary">上一页</button><span id="ledger-page"></span><button id="ledger-next" type="button" class="secondary">下一页</button></div>
+      <p class="hint">核算金额按记录中的模型、用量、峰谷费率计算，不是服务商账户余额或最终账单。缺失用量会保留待核对状态，不当作零消费。历史快照不随新设置改变。</p>
+    </section>
+    <section id="settings">
+      <div class="section-heading"><h2>积分、额度与费率</h2><span id="revision" class="muted"></span></div>
+      <form id="settings-form">
+        <div class="form-grid">
+          <label>1 元对应积分<input name="points_per_yuan" type="number" min="0.001" step="0.001" required></label>
+          <label>每日 RP 基础积分<input name="rp_base_points" type="number" min="0" step="0.001" required></label>
+          <label>每 1 RP 增加积分<input name="rp_step_points" type="number" min="0" step="0.001" required></label>
+          <label>全局每日额度（元）<input name="global_daily_yuan" type="number" min="0" step="0.000001" required></label>
+          <label>默认单群每日额度（元）<input name="group_daily_yuan" type="number" min="0" step="0.000001" required></label>
+          <label>每次请求预占（元）<input name="reserve_yuan" type="number" min="0" step="0.000001" required></label>
+        </div>
+        <p class="hint">RP 奖励 = 基础积分 + RP × 每 RP 积分。金额比例只用于新请求结算；已有积分数和历史账单不会重算。</p>
+        <div id="mapping" class="mapping"></div>
+        <p id="calendar-warning" class="hint" role="status" hidden></p>
+        <div class="form-grid json-fields">
+          <label>指定群每日额度（JSON）<textarea name="group_overrides" rows="5" spellcheck="false" required></textarea><small>键为群号或 platform:群号，值为人民币每日额度；删除对应项后使用默认额度。</small></label>
+          <label>中国法定节假日（JSON 日期列表）<textarea name="holidays" rows="5" spellcheck="false" required></textarea><small>示例：["2026-10-01"]。列表中的日期按空闲时段；周末同样为空闲时段。</small></label>
+          <label class="wide">模型价格（JSON，元 / 百万 Token）<textarea name="model_prices" rows="12" spellcheck="false" required></textarea><small>模型名 → offpeak / peak → input（未命中输入）、cached（命中输入）、output（输出）。工作日 09:00–12:00、14:00–18:00 为高峰，法定节假日除外。</small></label>
+        </div>
+        <h3>插件个人积分收费</h3><p class="hint">自动读取已加载插件。默认全部免扣个人积分；勾选后该插件的 LLM 调用按费用扣积分。新安装插件默认不勾选。全局和群额度始终适用。</p>
+        <div id="plugins-list" class="plugin-grid"></div>
+        <div class="form-action"><button type="submit">保存设置</button><span class="hint">保存后用于后续请求。多人同时修改时请刷新再保存。</span></div>
+      </form>
+      <details><summary>后端换算核验</summary><pre id="quote">尚未加载</pre></details>
+    </section>
+    <section id="reconcile">
+      <h2>未知用量核对</h2><p class="hint">在服务商账单确认后，填写待核对请求的用量。只有确认未发生收费时才选择取消。操作原因和管理员会保留。</p>
+      <form id="resolve-form" class="form-grid">
+        <label class="wide">请求编号<input name="request_id" required maxlength="200" placeholder="从历史快照复制 request_id"></label>
+        <label>处理方式<select name="mode"><option value="usage">补录用量并结算</option><option value="cancel">确认未收费，取消预占</option></select></label>
+        <label>核对原因<input name="reason" required maxlength="200"></label>
+        <label class="wide" id="usage-label">实际用量（JSON）<textarea name="usage" rows="5" spellcheck="false">{"cache_miss_tokens": 98000, "cache_hit_tokens": 0, "output_tokens": 2000}</textarea><small>分别填写未缓存输入、缓存命中输入和输出 Token 整数；请以服务商实际账单为准。</small></label>
+        <div class="form-action"><button type="submit">提交核对结果</button></div>
+      </form>
+    </section>
+  </main>
+  <footer>金额均为人民币 · 所有日期按北京时间显示 · 页面仅通过 AstrBot 管理桥访问数据</footer>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

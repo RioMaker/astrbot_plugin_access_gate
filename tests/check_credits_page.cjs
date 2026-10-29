@@ -16,13 +16,15 @@ const { chromium } = require("playwright");
     assert.match(await page.locator("#mapping").innerText(), /4\.24/);
     assert.equal(await page.locator("#plugins-list img").count(), 0);
     assert.equal(await page.locator("#users-body script").count(), 0);
-    assert.equal(await page.locator('#plugins-list input:checked').count(), 0);
+    assert.equal(await page.locator('#plugins-list input').count(), 0);
+    assert.match(await page.locator('#plugins-list').innerText(), /六爻[\s\S]*独立调用放行/);
+    assert.match(await page.locator('#overview').innerText(), /不扣积分、不占额度、不新增流水/);
     await page.locator('#settings-form input[name="points_per_yuan"]').fill("40");
     assert.match(await page.locator("#mapping").innerText(), /8\.48/);
-    await page.locator('#plugins-list input[value="astrbot_plugin_liuyao"]').check();
     await page.locator('#settings-form button[type="submit"]').click();
     await page.waitForFunction(() => document.querySelector("#revision").textContent.includes("2"));
-    assert.equal(await page.locator('#plugins-list input:checked').count(), 1);
+    assert.equal(await page.locator('#plugins-list input').count(), 0);
+    assert.deepEqual((await page.evaluate(() => window.AstrBotPluginPage.apiGet('credits/settings'))).values.charged_plugins, []);
     await page.locator('#users details summary').click();
     await page.locator('#adjust-form input[name="platform"]').fill("qq");
     await page.locator('#adjust-form input[name="user_id"]').fill("10001");
@@ -40,7 +42,7 @@ const { chromium } = require("playwright");
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 390));
     await page.evaluate(() => document.documentElement.dataset.theme = "dark");
     assert.equal(errors.length, 0, errors.join("\n"));
-    console.log("Credits UI: mapping, plugin settings, adjustment, reconciliation, XSS text, mobile layout passed.");
+    console.log("Credits UI: mapping, plugin passthrough, adjustment, reconciliation, XSS text, mobile layout passed.");
   } finally {
     await browser.close();
   }

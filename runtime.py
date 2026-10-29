@@ -1,7 +1,7 @@
-"""Reversible billing boundaries for AstrBot-managed chat Providers.
+"""Bill only Access Gate's explicitly marked chat sessions.
 
-This does not intercept plugins' private HTTP clients. Background jobs must bind
-their own billing_scope rather than reuse a finished message's inherited context.
+Plugin-owned calls, unmarked sessions and background jobs pass through. A live
+scope prevents delayed work from borrowing a completed chat's billing identity.
 """
 
 # Runtime integrations may raise arbitrary plugin exceptions. Catch at the
@@ -18,7 +18,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import wraps
+from functools import partial, wraps
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,7 +36,7 @@ class _Lifetime:
 @dataclass
 class _Scope:
     event: Any
-    plugin: str
+    plugin: str | None
     lifetime: _Lifetime
 
 
@@ -70,7 +70,7 @@ class BillingRuntime:
     Both callbacks are asynchronous. Each accepted invocation settles exactly
     once, even after uninstall or caller cancellation. Settlement tasks remain
     owned until completion; ``drain`` can await them during plugin shutdown.
-    Unknown/expired event attribution is deliberately passed to begin as None.
+    Unknown/expired event attribution is outside this gateway's control scope.
     """
 
     def __init__(self, context, begin: Callable, settle: Callable, on_error=None):
@@ -218,14 +218,14 @@ class BillingRuntime:
             return False
 
     def _install_degraded_guard(self):
-        """Keep discovered providers closed even if message attribution failed."""
+        """Protect marked chats without disabling unrelated provider consumers."""
         self._installation = installation = _Lifetime()
         self.active = True
         try:
             self._refresh(self._providers(), installation)
         except Exception as exc:
             self._warn(
-                f"降级保护无法读取 Provider（{type(exc).__name__}），必须停止模型服务。"
+                f"降级保护无法读取 Provider（{type(exc).__name__}），门禁会话已暂停。"
             )
         try:
             manager = self.context.provider_manager
@@ -233,12 +233,12 @@ class BillingRuntime:
             self._patch(
                 manager,
                 "load_provider",
-                self._block_method(original, installation, stream=False),
+                self._wrap_load(original, installation),
             )
             self._hotload_ready = True
         except Exception as exc:
             self._warn(
-                f"无法封锁 Provider 热加载（{type(exc).__name__}），必须停止模型服务。"
+                f"无法跟踪 Provider 热加载（{type(exc).__name__}），门禁会话已暂停。"
             )
 
     def _refresh(self, providers, installation):
@@ -266,7 +266,7 @@ class BillingRuntime:
                 )
                 if not compatible:
                     self._warn(
-                        f"Provider {type(provider).__name__}.{name} 接口不兼容，将阻断此路径。"
+                        f"Provider {type(provider).__name__}.{name} 接口不兼容，将暂停门禁会话。"
                     )
                     if original is None:
                         continue
@@ -281,7 +281,7 @@ class BillingRuntime:
                     self._patch(provider, name, wrapper)
                 except Exception as exc:
                     self._warn(
-                        f"Provider {type(provider).__name__}.{name} 无法安装网关（{type(exc).__name__}），必须停止模型服务。"
+                        f"Provider {type(provider).__name__}.{name} 无法安装网关（{type(exc).__name__}），门禁会话已暂停。"
                     )
                     continue
                 self._provider_methods[key] = wrapper
@@ -337,16 +337,31 @@ class BillingRuntime:
             "inflight": self._inflight,
             "pending_settlements": len(self._pending),
             "errors": list(self._errors),
-            "coverage": "仅 AstrBot 管理的聊天 Provider；私有 HTTP/SDK 不在控制范围。",
+            "coverage": "仅门禁插件触发的会话及提及判断；其他插件、未标记会话和后台调用直接放行。",
         }
 
     def _live_scope(self):
         scope = self._scope.get()
         return scope if scope and scope.lifetime.active else None
 
+    def mark_chat(self, event):
+        """Called only when Access Gate itself is about to initiate a chat."""
+        event.set_extra("access_gate_credit_session", self._installation)
+
+    def _controlled(self):
+        scope = self._live_scope()
+        return bool(
+            scope
+            and scope.plugin == ""
+            and scope.event is not None
+            and self._installation is not None
+            and scope.event.get_extra("access_gate_credit_session")
+            is self._installation
+        )
+
     @contextmanager
     def billing_scope(self, event, plugin: str = ""):
-        """Explicit, bounded identity for a background job or custom caller."""
+        """Bounded execution identity; does not mark a session for billing."""
         lifetime = _Lifetime()
         token = self._scope.set(_Scope(event, self._normalize_plugin(plugin), lifetime))
         try:
@@ -360,8 +375,22 @@ class BillingRuntime:
         return "" if plugin == "astrbot_plugin_access_gate" else str(plugin or "")
 
     def _plugin_for(self, handler):
-        module = getattr(handler, "__module__", "") or ""
         try:
+            # StarManager binds commands, hooks and decorator tools with
+            # partial(function, plugin_instance). Its own module is functools,
+            # so resolve the underlying callable before checking plugin roots.
+            seen = set()
+            while handler is not None:
+                if id(handler) in seen:
+                    return None
+                seen.add(id(handler))
+                if isinstance(handler, partial):
+                    handler = handler.func
+                elif getattr(handler, "__wrapped__", None) is not None:
+                    handler = handler.__wrapped__
+                else:
+                    break
+            module = getattr(handler, "__module__", "") or ""
             matches = []
             for star in self.context.get_all_stars():
                 root = getattr(star, "module_path", "") or ""
@@ -369,16 +398,16 @@ class BillingRuntime:
                 # beside main.py. Remove only that final conventional component.
                 root = root.removesuffix(".main")
                 name = getattr(star, "name", "") or ""
-                if "builtin_stars" in root.split(".") or getattr(
-                    star, "reserved", False
-                ):
-                    continue
                 if root and (module == root or module.startswith(root + ".")):
+                    if "builtin_stars" in root.split(".") or getattr(
+                        star, "reserved", False
+                    ):
+                        name = ""
                     matches.append((len(root), name))
-            return self._normalize_plugin(max(matches)[1]) if matches else ""
+            return self._normalize_plugin(max(matches)[1]) if matches else None
         except Exception as exc:
             self._warn(f"插件调用归属读取失败（{type(exc).__name__}）。")
-            return ""
+            return None
 
     def _nested(self, provider):
         task = asyncio.current_task()
@@ -475,7 +504,7 @@ class BillingRuntime:
 
             @wraps(original)
             async def blocked_stream(*args, **kwargs):
-                if self._enabled(installation):
+                if self._enabled(installation) and self._controlled():
                     await reject()
                 iterator = original(*args, **kwargs)
                 try:
@@ -490,7 +519,7 @@ class BillingRuntime:
 
         @wraps(original)
         async def blocked_chat(*args, **kwargs):
-            if self._enabled(installation):
+            if self._enabled(installation) and self._controlled():
                 await reject()
             result = original(*args, **kwargs)
             return await result if inspect.isawaitable(result) else result
@@ -710,7 +739,11 @@ class BillingRuntime:
     def _wrap_chat(self, provider, original, installation):
         @wraps(original)
         async def text_chat(*args, **kwargs):
-            if not self._enabled(installation) or self._nested(provider):
+            if (
+                not self._enabled(installation)
+                or not self._controlled()
+                or self._nested(provider)
+            ):
                 return await original(*args, **kwargs)
             ticket = await self._begin(
                 provider, self._call_kwargs(original, args, kwargs)
@@ -756,7 +789,11 @@ class BillingRuntime:
     def _wrap_stream(self, provider, original, installation):
         @wraps(original)
         async def text_chat_stream(*args, **kwargs):
-            observe = self._enabled(installation) and not self._nested(provider)
+            observe = (
+                self._enabled(installation)
+                and self._controlled()
+                and not self._nested(provider)
+            )
             if not observe:
                 iterator = original(*args, **kwargs)
                 try:

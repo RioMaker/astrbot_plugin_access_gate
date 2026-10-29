@@ -42,7 +42,7 @@ DEFAULTS = {
     "global_daily_yuan": 10,
     "group_daily_yuan": 2,
     "reserve_yuan": 0.212,
-    "charged_plugins": [],
+    "charged_plugins": [],  # Legacy compatibility only; independent plugins pass through.
     "group_overrides": {},
     "holidays": HOLIDAYS_2026.copy(),
     "model_prices": {
@@ -107,9 +107,9 @@ def validate_settings(values: dict) -> dict:
     plugins = result["charged_plugins"]
     if not isinstance(plugins, list) or len(plugins) > 500:
         raise ValueError("charged_plugins 必须是最多 500 项的插件名称列表")
-    result["charged_plugins"] = list(
-        dict.fromkeys(_label(value, "插件名称") for value in plugins)
-    )
+    for value in plugins:
+        _label(value, "插件名称")
+    result["charged_plugins"] = []
     overrides = result["group_overrides"]
     if not isinstance(overrides, dict) or len(overrides) > 5000:
         raise ValueError("group_overrides 必须是最多 5000 项的群额度对象")

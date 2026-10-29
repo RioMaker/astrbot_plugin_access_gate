@@ -17,7 +17,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
-PLUGIN_VERSION = "2.0.1"
+PLUGIN_VERSION = "2.1.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -150,15 +150,10 @@ class AccessGatePlugin(Star):
             else {"installed": False},
             "rp": self.rp_bridge.status() if self.rp_bridge else {"connected": False},
             "storage_error": self.economy.fault if self.economy else "尚未初始化",
-            "coverage": "接管 AstrBot 管理的聊天 Provider。直接 HTTP/SDK 调用需单独适配；无有效用户/群归属的后台请求将拒绝。预留是估值，在途实际成本可能越过额度。",
+            "coverage": "仅门禁插件触发的普通 AI 会话及提及判断受积分、全局和群额度控制；其他插件独立调用、WebChat、其他唤醒入口和后台请求直接放行，不计入本账本。预留是估值，在途实际成本可能越过额度。",
         }
 
     def credit_plugins(self):
-        charged = (
-            set(self.economy._settings()["values"]["charged_plugins"])
-            if self.economy
-            else set()
-        )
         result = []
         for star in self.context.get_all_stars():
             name = str(getattr(star, "name", "") or "")
@@ -170,7 +165,8 @@ class AccessGatePlugin(Star):
                     "display_name": str(getattr(star, "display_name", "") or name),
                     "version": str(getattr(star, "version", "") or ""),
                     "activated": bool(getattr(star, "activated", False)),
-                    "charged": name in charged,
+                    "charged": False,
+                    "controlled": False,
                 }
             )
         return sorted(result, key=lambda item: item["name"])
@@ -201,7 +197,7 @@ class AccessGatePlugin(Star):
             f"当前积分：{balance:g}\n"
             f"按当前比例折合 ¥{balance / settings['points_per_yuan']:.6f}\n"
             f"每日 /rp 奖励：{settings['rp_base_points']:g} + RP × {settings['rp_step_points']:g} 分。\n"
-            "余额大于 0 可发起对话，完成后按实际 token 成本扣分；余额可能扣为负数，补足后可继续。"
+            "门禁唤醒的会话要求余额大于 0，完成后按实际 token 成本扣分；余额可能扣为负数，补足后可继续。其他插件独立调用直接放行。"
         )
 
     @staticmethod
@@ -629,23 +625,6 @@ class AccessGatePlugin(Star):
         await self._enforce_access(event)
         if event.is_stopped():
             return
-        if (
-            self._bool("credits_enabled", True)
-            and self.billing_runtime
-            and not self.billing_runtime.status().get("complete")
-        ):
-            # A broken accounting boundary must never silently become free chat.
-            roots = {
-                self._root_command(text) for text in self._message_candidates(event)
-            }
-            if not roots.intersection({"rp", "积分", "accessgate"}):
-                event.stop_event()
-                await event.send(
-                    event.plain_result(
-                        "积分额度网关接入不完整，已暂停请求；请管理员查看积分管理页的接入状态。"
-                    )
-                )
-                return
         if not event.is_stopped():
             await self._enforce_group_rest(event)
         if not event.is_stopped():
@@ -700,6 +679,20 @@ class AccessGatePlugin(Star):
         result = json.loads(response.completion_text.strip())
         return isinstance(result, dict) and result.get("should_reply") is True
 
+    async def _prepare_credit_chat(self, event: AstrMessageEvent) -> bool:
+        if not self._bool("credits_enabled", True) or not self.billing_runtime:
+            return True
+        if not self.billing_runtime.status().get("complete"):
+            event.stop_event()
+            await event.send(
+                event.plain_result(
+                    "积分额度网关接入不完整，门禁会话已暂停；请管理员查看积分管理页的接入状态。"
+                )
+            )
+            return False
+        self.billing_runtime.mark_chat(event)
+        return True
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=GATE_PRIORITY - 1)
     async def route_wake(self, event: AstrMessageEvent) -> None:
         if event.is_stopped():
@@ -753,6 +746,8 @@ class AccessGatePlugin(Star):
         if not direct and mentioned and not at_bot:
             if not self._bool("mention_judge_enabled", True):
                 return
+            if not await self._prepare_credit_chat(event):
+                return
             try:
                 should_reply = await self._judge_mention(event, text)
             except Exception as exc:  # noqa: BLE001 - provider failures must suppress wake
@@ -771,6 +766,8 @@ class AccessGatePlugin(Star):
         if not body and not has_media:
             event.stop_event()
             await event.send(event.plain_result("我在，请继续说。"))
+            return
+        if not await self._prepare_credit_chat(event):
             return
         event.set_extra("access_gate_original_text", text)
         event.message_str = body

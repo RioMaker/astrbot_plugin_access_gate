@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <div><p class="eyebrow">ACCESS GATE · 管理中心</p><h1>积分与模型额度</h1><p class="muted">RP 获得积分，模型按实际用量结算。每日额度按北京时间重置。</p></div>
+    <div><p class="eyebrow">ACCESS GATE · 管理中心</p><h1>积分与模型额度</h1><p class="muted">RP 获得积分，仅门禁触发的 AI 会话按用量结算。每日额度按北京时间重置。</p></div>
     <button id="refresh" class="secondary" type="button">刷新数据</button>
   </header>
   <div id="message" role="status" aria-live="polite" hidden></div>
@@ -17,7 +17,7 @@
     <section id="overview">
       <div class="section-heading"><h2>今日额度</h2><span id="day" class="muted">等待连接 AstrBot</span></div>
       <div id="summary" class="cards"></div>
-      <p class="hint">可用额度 = 每日上限 − 已结算金额 − 在途预占。插件免扣个人积分时，LLM 成本仍计入全局及所属群额度。</p>
+      <p class="hint">可用额度 = 每日上限 − 已结算金额 − 在途预占。仅门禁唤醒的会话及提及判断受控；其他插件、WebChat、其他入口及后台调用直接放行，不扣积分、不占额度、不新增流水。升级前的历史记录保留。</p>
       <div class="table-wrap"><table><caption>各群额度</caption><thead><tr><th>平台 / 群号</th><th>额度来源</th><th>每日上限</th><th>已结算</th><th>预占</th><th>可用</th></tr></thead><tbody id="groups-body"></tbody></table></div>
       <details><summary>关联与拦截状态</summary><pre id="integration">尚未加载</pre></details>
     </section>
@@ -62,7 +62,7 @@
           <label>中国法定节假日（JSON 日期列表）<textarea name="holidays" rows="5" spellcheck="false" required></textarea><small>示例：["2026-10-01"]。列表中的日期按空闲时段；周末同样为空闲时段。</small></label>
           <label class="wide">模型价格（JSON，元 / 百万 Token）<textarea name="model_prices" rows="12" spellcheck="false" required></textarea><small>模型名 → offpeak / peak → input（未命中输入）、cached（命中输入）、output（输出）。工作日 09:00–12:00、14:00–18:00 为高峰，法定节假日除外。</small></label>
         </div>
-        <h3>插件个人积分收费</h3><p class="hint">自动读取已加载插件。默认全部免扣个人积分；勾选后该插件的 LLM 调用按费用扣积分。新安装插件默认不勾选。全局和群额度始终适用。</p>
+        <h3>插件调用范围</h3><p class="hint">自动检测已加载插件。所有插件独立调用均直接放行；旧版插件收费勾选不再生效。主 AI 在门禁会话中选择工具、接收工具结果后继续回复的请求仍按会话计费。</p>
         <div id="plugins-list" class="plugin-grid"></div>
         <div class="form-action"><button type="submit">保存设置</button><span class="hint">保存后用于后续请求。多人同时修改时请刷新再保存。</span></div>
       </form>

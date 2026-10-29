@@ -101,18 +101,14 @@ async function loadLedger() {
 }
 function renderPlugins() {
   const body = $("plugins-list"); body.replaceChildren();
-  const selected = new Set(state.values?.charged_plugins || []);
-  const plugins = [...state.plugins];
-  for (const name of selected) if (!plugins.some((item) => item.name === name)) plugins.push({ name, display_name: name, activated: false, unavailable: true });
-  for (const plugin of plugins) {
+  for (const plugin of state.plugins) {
     if (!plugin.name) continue;
-    const label = element("label", undefined, "plugin");
-    const check = document.createElement("input"); check.type = "checkbox"; check.value = plugin.name; check.name = "charged_plugin"; check.checked = selected.has(plugin.name);
+    const label = element("div", undefined, "plugin");
     const text = element("span", plugin.display_name || plugin.name);
-    text.append(element("small", `${plugin.name}${plugin.version ? ` · ${plugin.version}` : ""} · ${plugin.unavailable ? "当前未检测到" : plugin.activated === false ? "已停用" : "已启用"}`));
-    label.append(check, text); body.append(label);
+    text.append(element("small", `${plugin.name}${plugin.version ? ` · ${plugin.version}` : ""} · ${plugin.activated === false ? "已停用" : "已启用"} · 独立调用放行`));
+    label.append(text); body.append(label);
   }
-  if (!body.children.length) body.append(element("p", "未检测到可配置插件。", "muted"));
+  if (!body.children.length) body.append(element("p", "未检测到其他插件。", "muted"));
 }
 function renderMapping() {
   const form = $("settings-form"), target = $("mapping"); target.replaceChildren();
@@ -177,7 +173,7 @@ $("settings-form").addEventListener("submit", (event) => {
     const values = { ...state.values };
     for (const key of numericKeys) { const value = Number(form.elements[key].value); if (!Number.isFinite(value)) throw new Error(`${key} 必须为有效数字`); values[key] = value; }
     for (const key of jsonKeys) values[key] = parseJSONField(form, key);
-    values.charged_plugins = Array.from(form.querySelectorAll('input[name="charged_plugin"]:checked'), (item) => item.value);
+    values.charged_plugins = [];
     await bridge.apiPost("credits/settings", { revision: state.revision, values });
     await Promise.all([loadSettings(), loadOverview()]); message("设置已保存，后续请求使用新配置");
   });

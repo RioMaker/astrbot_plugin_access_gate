@@ -80,7 +80,11 @@ class Economy:
         self.fault = ""
 
     def _settings(self):
-        return self.store.settings(copy.deepcopy(DEFAULTS))
+        payload = self.store.settings(copy.deepcopy(DEFAULTS))
+        # Retain the legacy key for old databases/clients, but it no longer
+        # enables billing for independent plugin calls.
+        payload["values"]["charged_plugins"] = []
+        return payload
 
     async def settings(self):
         return await asyncio.to_thread(self._settings)
@@ -139,6 +143,8 @@ class Economy:
         return model, provider_id
 
     async def begin(self, event, plugin, provider, kwargs):
+        if plugin:
+            return None
         if self.fault or FAILED_REQUESTS:
             raise RuntimeGateDenied(
                 "积分账本写入异常，已暂停新 LLM 请求，请管理员检查存储。"
@@ -149,8 +155,7 @@ class Economy:
             started = now()
             model, provider_id = self.provider_info(provider, kwargs)
             price = price_snapshot(settings, model, started)
-            plugin = str(plugin or "")
-            charged = not plugin or plugin in settings["charged_plugins"]
+            charged = True
             overrides = settings["group_overrides"]
             group_limit = overrides.get(
                 f"{person['platform']}:{person['group_id']}",
@@ -172,7 +177,7 @@ class Economy:
                     request_id,
                     person,
                     started.isoformat(),
-                    plugin or "chat",
+                    "chat",
                     charged,
                     details,
                     {"global": settings["global_daily_yuan"], "group": group_limit},

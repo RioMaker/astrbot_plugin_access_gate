@@ -155,42 +155,51 @@ def test_default_cost_is_212_points_and_snapshot_survives_settings_change(servic
     assert run(service.balance("qq", "u1")) == 17.88
 
 
-def test_exempt_plugin_still_consumes_global_and_group_budget(service):
+def test_independent_plugin_does_not_consume_points_or_budget(service):
+    settings(service, global_daily_yuan=0, group_daily_yuan=0)
     ticket = run(service.begin(Event(), "astrbot_plugin_liuyao", PROVIDER, {}))
+    assert ticket is None
     run(service.settle(ticket, response(), False))
     data = run(service.overview())
-    assert data["global"]["spent_yuan"] == 0.106
-    assert data["groups"][0]["spent_yuan"] == 0.106
+    assert data["global"]["spent_yuan"] == 0
+    assert data["global"]["reserved_yuan"] == 0
+    assert run(service.ledger({}))["total"] == 0
     assert run(service.balance("qq", "u1")) == 0
 
 
-def test_selected_plugin_requires_credits(service):
-    settings(service, charged_plugins=["astrbot_plugin_liuyao"])
-    with pytest.raises(RuntimeGateDenied, match="积分不足"):
-        run(service.begin(Event(), "astrbot_plugin_liuyao", PROVIDER, {}))
-    award(service)
+def test_legacy_plugin_charge_setting_is_ignored(service):
+    payload = service.store.settings(copy.deepcopy(DEFAULTS))
+    payload["values"]["charged_plugins"] = ["astrbot_plugin_liuyao"]
+    service.store.save_settings(
+        payload["revision"], payload["values"], "admin", WHEN.isoformat()
+    )
+    assert run(service.settings())["values"]["charged_plugins"] == []
     ticket = run(service.begin(Event(), "astrbot_plugin_liuyao", PROVIDER, {}))
+    assert ticket is None
     run(service.settle(ticket, response(), False))
-    assert run(service.balance("qq", "u1")) == 17.88
+    assert run(service.balance("qq", "u1")) == 0
 
 
-def test_global_budget_applies_to_exempt_plugins(service):
+def test_global_budget_applies_to_gate_chat(service):
+    award(service)
     settings(service, global_daily_yuan=0.212)
-    ticket = run(service.begin(Event(), "plugin", PROVIDER, {}))
+    ticket = run(service.begin(Event(), "", PROVIDER, {}))
     with pytest.raises(RuntimeGateDenied, match="全局"):
-        run(service.begin(Event("u2", "g2"), "plugin", PROVIDER, {}))
+        run(service.begin(Event("u2", "g2"), "", PROVIDER, {}))
     run(service.settle(ticket, response(input_=300000, output=0), False))
     assert run(service.overview())["global"]["remaining_yuan"] == 0
     with pytest.raises(RuntimeGateDenied, match="全局"):
-        run(service.begin(Event("u3", "g3"), "plugin", PROVIDER, {}))
+        run(service.begin(Event("u3", "g3"), "", PROVIDER, {}))
 
 
 def test_group_override_and_default_are_separate(service):
+    award(service)
+    award(service, user="u2", group="g2")
     settings(service, group_daily_yuan=0, group_overrides={"g1": 1, "qq:g2": 0.5})
     with pytest.raises(RuntimeGateDenied, match="本群"):
-        run(service.begin(Event(group="g3"), "plugin", PROVIDER, {}))
-    a = run(service.begin(Event(group="g1"), "plugin", PROVIDER, {}))
-    b = run(service.begin(Event(group="g2"), "plugin", PROVIDER, {}))
+        run(service.begin(Event(group="g3"), "", PROVIDER, {}))
+    a = run(service.begin(Event(group="g1"), "", PROVIDER, {}))
+    b = run(service.begin(Event(user="u2", group="g2"), "", PROVIDER, {}))
     run(service.settle(a, response(), False))
     run(service.settle(b, response(), False))
     groups = {item["group_id"]: item for item in run(service.overview())["groups"]}
@@ -260,7 +269,8 @@ def test_unknown_usage_preserves_reservation_and_can_be_reconciled(service):
 
 
 def test_admin_cannot_resolve_active_request(service):
-    ticket = run(service.begin(Event(), "plugin", PROVIDER, {}))
+    award(service)
+    ticket = run(service.begin(Event(), "", PROVIDER, {}))
     with pytest.raises(ValueError, match="只有用量未知"):
         run(
             service.resolve(
@@ -271,7 +281,8 @@ def test_admin_cannot_resolve_active_request(service):
 
 
 def test_same_process_reload_does_not_expose_inflight_as_unknown(service, tmp_path):
-    ticket = run(service.begin(Event(), "plugin", PROVIDER, {}))
+    award(service)
+    ticket = run(service.begin(Event(), "", PROVIDER, {}))
     other = economy.Economy(tmp_path / "credits.db")
     try:
         assert other.store.get_request(ticket["request_id"])["status"] == "reserved"
@@ -282,7 +293,8 @@ def test_same_process_reload_does_not_expose_inflight_as_unknown(service, tmp_pa
 
 
 def test_process_crash_preserves_unknown_reservation(service, tmp_path, monkeypatch):
-    ticket = run(service.begin(Event(), "plugin", PROVIDER, {}))
+    award(service)
+    ticket = run(service.begin(Event(), "", PROVIDER, {}))
     monkeypatch.setattr(ledger, "PROCESS_TOKEN", "new-process")
     other = economy.Economy(tmp_path / "credits.db")
     try:
@@ -345,13 +357,9 @@ def test_optimistic_settings_revision(service):
 
 def test_missing_event_and_unknown_model_fail_before_reserve(service):
     with pytest.raises(RuntimeGateDenied, match="没有有效"):
-        run(service.begin(None, "plugin", PROVIDER, {}))
+        run(service.begin(None, "", PROVIDER, {}))
     with pytest.raises(RuntimeGateDenied):
-        run(
-            service.begin(
-                Event(), "plugin", PROVIDER, {"model": "unknown-expensive-model"}
-            )
-        )
+        run(service.begin(Event(), "", PROVIDER, {"model": "unknown-expensive-model"}))
     assert run(service.ledger({}))["total"] == 0
 
 
@@ -389,17 +397,19 @@ def test_quote_current_defaults(service):
 
 
 def test_beijing_midnight_uses_new_daily_bucket(service, monkeypatch):
+    award(service)
     settings(service, global_daily_yuan=0.212)
-    ticket = run(service.begin(Event(), "plugin", PROVIDER, {}))
+    ticket = run(service.begin(Event(), "", PROVIDER, {}))
     run(service.settle(ticket, response(input_=212000, output=0), False))
     monkeypatch.setattr(economy, "now", lambda: WHEN.replace(day=30, hour=0))
-    new_ticket = run(service.begin(Event(), "plugin", PROVIDER, {}))
+    new_ticket = run(service.begin(Event(), "", PROVIDER, {}))
     assert new_ticket["request_id"] != ticket["request_id"]
     assert run(service.overview())["global"]["spent_yuan"] == 0
 
 
 def test_cancel_unknown_with_audit_releases_reserved_money(service):
-    ticket = run(service.begin(Event(), "plugin", PROVIDER, {}))
+    award(service)
+    ticket = run(service.begin(Event(), "", PROVIDER, {}))
     run(service.settle(ticket, None, True))
     row = run(
         service.resolve(

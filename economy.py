@@ -102,7 +102,7 @@ class Economy:
                 now().isoformat(),
             )
 
-    async def award(self, event, record):
+    async def award(self, event, record, *, with_receipt=False):
         today = now().date()
         day = record.get("date")
         rp = record.get("luck_value")
@@ -112,7 +112,7 @@ class Economy:
             or isinstance(rp, bool)
             or not 0 <= rp <= 100
         ):
-            return False
+            return None if with_receipt else False
         person = identity(event)
         settings = (await self.settings())["values"]
         points = (
@@ -120,7 +120,7 @@ class Economy:
             + Decimal(str(settings["rp_step_points"])) * rp
         )
         return await asyncio.to_thread(
-            self.store.award, person, day, rp, points, now().isoformat()
+            self.store.award, person, day, rp, points, now().isoformat(), with_receipt
         )
 
     @staticmethod

@@ -102,6 +102,46 @@ def test_parallel_rp_credit_is_atomic(service):
     assert run(service.balance("qq", "u1")) == 20
 
 
+def test_rp_receipt_uses_actual_award_and_latest_balance(service):
+    record = {"date": "2026-10-29", "luck_value": 73}
+    first = run(service.award(Event(), record, with_receipt=True))
+    assert first == {
+        "status": "awarded",
+        "awarded_points": 20.46,
+        "daily_points": 20.46,
+        "balance": 20.46,
+        "date": "2026-10-29",
+    }
+    ticket = run(service.begin(Event(), "", PROVIDER, {}))
+    run(service.settle(ticket, response(), False))
+    settings(service, rp_base_points=500, rp_step_points=10)
+    repeat = run(service.award(Event(group="other"), record, with_receipt=True))
+    assert repeat == {
+        "status": "claimed",
+        "awarded_points": 0,
+        "daily_points": 20.46,
+        "balance": 18.34,
+        "date": "2026-10-29",
+    }
+    assert "access_gate_credit" not in record
+
+
+def test_parallel_receipts_only_one_reports_new_points(service):
+    person = economy.identity(Event())
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        receipts = list(
+            pool.map(
+                lambda _: service.store.award(
+                    person, "2026-10-29", 50, 20, WHEN.isoformat(), True
+                ),
+                range(16),
+            )
+        )
+    assert sum(item["status"] == "awarded" for item in receipts) == 1
+    assert sum(item["awarded_points"] for item in receipts) == 20
+    assert all(item["balance"] == 20 for item in receipts)
+
+
 def test_default_cost_is_212_points_and_snapshot_survives_settings_change(service):
     award(service)
     ticket = run(service.begin(Event(), "", PROVIDER, {}))

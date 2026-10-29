@@ -17,7 +17,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
-PLUGIN_VERSION = "2.0.0"
+PLUGIN_VERSION = "2.0.1"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -139,7 +139,8 @@ class AccessGatePlugin(Star):
 
     async def _award_rp(self, event, record):
         if self._bool("credits_enabled", True) and self.economy:
-            await self.economy.award(event, record)
+            return await self.economy.award(event, record, with_receipt=True)
+        return None
 
     def credit_status(self):
         return {

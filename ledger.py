@@ -163,14 +163,18 @@ class Ledger:
             tuple(values.values()),
         )
 
-    def award(self, identity, day, rp, points, now):
+    def award(self, identity, day, rp, points, now, with_receipt=False):
         with self.transaction():
             claim = self.db.execute(
                 "INSERT INTO rp_claims VALUES('taiko_rp',?,?) ON CONFLICT DO NOTHING",
                 (identity["user_id"], day),
             )
             if not claim.rowcount:
-                return False
+                return (
+                    self._rp_receipt(identity, day, awarded=False)
+                    if with_receipt
+                    else False
+                )
             balance = self._user(identity) + units(points, POINTS)
             self.db.execute(
                 "UPDATE users SET balance=? WHERE platform=? AND user_id=?",
@@ -187,7 +191,32 @@ class Ledger:
                 points_delta=units(points, POINTS),
                 balance_after=balance,
             )
-            return True
+            return (
+                self._rp_receipt(identity, day, awarded=True) if with_receipt else True
+            )
+
+    def _rp_receipt(self, identity, day, *, awarded):
+        # Read the reward and current balance under the same write transaction.
+        # A repeat uses its original reward even if the administrator changed the
+        # reward formula after this user's first claim.
+        row = self.db.execute(
+            "SELECT points_delta FROM ledger WHERE request_id=? AND kind='rp'",
+            (f"rp:{identity['user_id']}:{day}",),
+        ).fetchone()
+        if row is None:
+            raise ValueError("签到凭证缺少积分流水，请管理员核对账本。")
+        balance = self.db.execute(
+            "SELECT balance FROM users WHERE platform=? AND user_id=?",
+            (identity["platform"], identity["user_id"]),
+        ).fetchone()
+        daily_points = amount(row["points_delta"], POINTS)
+        return {
+            "status": "awarded" if awarded else "claimed",
+            "awarded_points": daily_points if awarded else 0,
+            "daily_points": daily_points,
+            "balance": amount(balance[0], POINTS) if balance else 0,
+            "date": day,
+        }
 
     def _daily(self, day, platform=None, group=None):
         where, args = "day=? AND kind='consumption'", [day]

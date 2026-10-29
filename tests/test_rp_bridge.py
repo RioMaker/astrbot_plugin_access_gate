@@ -140,9 +140,58 @@ def test_failed_award_preserves_rp_result_and_records_retryable_error():
 
     bridge, rp, event, _, _, errors = make_bridge(callback=failed)
     bridge.install()
-    assert asyncio.run(rp.rp(event)) is rp.record
+    result = asyncio.run(rp.rp(event))
+    assert result["access_gate_credit"] == {"status": "error", "date": DAY}
+    assert "access_gate_credit" not in rp.record
     assert "ledger unavailable" in errors[0]
     assert bridge.status()["last_error"] == errors[0]
+
+
+def test_receipt_is_request_local_and_never_mutates_cached_record():
+    async def scenario():
+        receipts = iter(
+            [
+                {
+                    "status": "awarded",
+                    "awarded_points": 20,
+                    "daily_points": 20,
+                    "balance": 20,
+                    "date": DAY,
+                },
+                {
+                    "status": "claimed",
+                    "awarded_points": 0,
+                    "daily_points": 20,
+                    "balance": 17.88,
+                    "date": DAY,
+                },
+            ]
+        )
+
+        async def award(event, record):
+            return next(receipts)
+
+        bridge, rp, event, _, _, _ = make_bridge(callback=award)
+        bridge.install()
+        first = await rp.rp(event)
+        second = await rp.rp(event)
+        assert first["access_gate_credit"]["status"] == "awarded"
+        assert second["access_gate_credit"]["status"] == "claimed"
+        assert second["access_gate_credit"]["balance"] == 17.88
+        assert "access_gate_credit" not in rp.record
+        assert first is not second
+
+    asyncio.run(scenario())
+
+
+def test_disabled_reward_strips_stale_presentation_receipt():
+    async def disabled(event, record):
+        return None
+
+    bridge, rp, event, _, _, _ = make_bridge(callback=disabled)
+    rp.record["access_gate_credit"] = {"status": "awarded", "awarded_points": 999}
+    bridge.install()
+    assert "access_gate_credit" not in asyncio.run(rp.rp(event))
 
 
 @pytest.mark.parametrize(

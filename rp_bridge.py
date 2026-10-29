@@ -127,8 +127,17 @@ class RPBridge:
         async def wrapped(event, *args, **kwargs):
             started_day = self._today()
             record = await original(event, *args, **kwargs)
+            # Presentation receipts are per request; never retain an earlier
+            # caller's success notice in an RP-owned cached record.
+            if isinstance(record, dict) and "access_gate_credit" in record:
+                record = {
+                    key: value
+                    for key, value in record.items()
+                    if key != "access_gate_credit"
+                }
             if not self._active:
                 return record
+            eligible = False
             try:
                 # A request crossing midnight may legitimately return either
                 # day's record. Historical/preview records are not accepted.
@@ -147,9 +156,23 @@ class RPBridge:
                 sender = str(event.get_sender_id() or "").strip()
                 if not sender:
                     raise ValueError("RP 缺少发送者标识")
-                await self.on_award(event, dict(record))
+                eligible = True
+                receipt = await self.on_award(event, dict(record))
+                if isinstance(receipt, dict) and receipt.get("status") in {
+                    "awarded",
+                    "claimed",
+                }:
+                    return {**record, "access_gate_credit": dict(receipt)}
             except Exception as exc:  # noqa: BLE001 - rewards must not break RP
                 self._report(f"RP 积分登记失败：{type(exc).__name__}: {exc}")
+                if eligible:
+                    return {
+                        **record,
+                        "access_gate_credit": {
+                            "status": "error",
+                            "date": record["date"],
+                        },
+                    }
             return record
 
         wrapped.__access_gate_rp_bridge__ = self

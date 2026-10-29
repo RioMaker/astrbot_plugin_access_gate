@@ -17,7 +17,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
-PLUGIN_VERSION = "2.1.0"
+PLUGIN_VERSION = "2.1.1"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -192,13 +192,7 @@ class AccessGatePlugin(Star):
 
         person = identity(event)
         balance = await self.economy.balance(person["platform"], person["user_id"])
-        settings = (await self.economy.settings())["values"]
-        yield event.plain_result(
-            f"当前积分：{balance:g}\n"
-            f"按当前比例折合 ¥{balance / settings['points_per_yuan']:.6f}\n"
-            f"每日 /rp 奖励：{settings['rp_base_points']:g} + RP × {settings['rp_step_points']:g} 分。\n"
-            "门禁唤醒的会话要求余额大于 0，完成后按实际 token 成本扣分；余额可能扣为负数，补足后可继续。其他插件独立调用直接放行。"
-        )
+        yield event.plain_result(f"当前积分：{balance:g}")
 
     @staticmethod
     def _rest_minute(value: object) -> int:

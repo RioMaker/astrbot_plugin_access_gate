@@ -5,6 +5,7 @@ import inspect
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from functools import partial, wraps
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -67,14 +68,42 @@ class ProviderRequest:
     pass
 
 
+class Plain:
+    def __init__(self, text):
+        self.text = text
+
+
+class Result:
+    def __init__(self, text="", *, kind="LLM_RESULT", stream=None):
+        self.chain = [Plain(text)] if text else []
+        self.result_content_type = SimpleNamespace(name=kind)
+        self.async_stream = stream
+
+    def text(self):
+        return "".join(part.text for part in self.chain if isinstance(part, Plain))
+
+
+class ResultEvent(Event):
+    result = None
+
+    def get_result(self):
+        return self.result
+
+    def plain_result(self, text):
+        return Result(text, kind="GENERAL_RESULT")
+
+
 class Provider:
     def __init__(self):
         self.requests = 0
         self.input_tokens = 10
+        self.tools_call_name = []
 
     async def text_chat(self, prompt=None, model=None, **kwargs):
         self.requests += 1
-        return reply(self.input_tokens)
+        response = reply(self.input_tokens)
+        response.tools_call_name = self.tools_call_name
+        return response
 
     async def text_chat_stream(self, **kwargs):
         yield reply(1, chunk=True)
@@ -748,6 +777,201 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         async for _ in self.agent_stage.process(self.event):
             pass
         self.assertEqual(self.started[0][1], "")
+
+    async def _notice_setup(self):
+        service = await self._attach_economy()
+        event = ResultEvent()
+        self.runtime.mark_chat(event)
+        await service.adjust(
+            {
+                "platform": "qq",
+                "user_id": "10001",
+                "delta": 20,
+                "reason": "验证回复实际扣分",
+                "request_id": "runtime_credit_notice_test",
+            },
+            "admin",
+        )
+        return service, event
+
+    def _notice_stage(self, process, event):
+        wrapped = self.runtime._wrap_request_process(
+            process, self.runtime._installation
+        )
+        return wrapped(None, event)
+
+    async def test_final_notice_sums_ledger_and_excludes_independent_tool_cost(self):
+        service, event = await self._notice_setup()
+        with self.runtime.billing_scope(event):
+            await self.provider.text_chat()  # Gate mention classifier.
+        self.runtime.mark_chat(event)  # A second mark must retain that receipt.
+        history_part = Plain("最后的回答")
+
+        async def process(_, event):
+            self.provider.tools_call_name = ["cast_liuyao"]
+            await self.provider.text_chat()
+            event.result = Result("准备调用工具")
+            yield
+            with self.runtime.billing_scope(event, "astrbot_plugin_liuyao"):
+                await self.provider.text_chat()
+            event.result = Result("插件结果", kind="GENERAL_RESULT")
+            yield
+            self.provider.tools_call_name = []
+            await self.provider.text_chat()
+            event.result = Result()
+            event.result.chain = [history_part]
+            yield
+            yield  # Re-processing the same result must not add another footer.
+
+        outputs = [event.result async for _ in self._notice_stage(process, event)]
+        records = (await service.ledger({"kind": "consumption"}))["items"]
+        total = sum(-Decimal(str(row["points_delta"])) for row in records)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(outputs[0].text(), "准备调用工具")
+        self.assertEqual(outputs[1].text(), "插件结果")
+        self.assertEqual(outputs[2].text(), f"最后的回答\n[积分-{total:.2f}]")
+        self.assertEqual(outputs[3].text().count("[积分-"), 1)
+        self.assertEqual(history_part.text, "最后的回答")
+        self.assertAlmostEqual(await service.balance("qq", "10001"), 20 - float(total))
+
+    async def test_stream_tail_settles_before_final_response_and_is_not_repeated(self):
+        service, event = await self._notice_setup()
+        upstream = self.provider.text_chat_stream()
+        chunks = []
+
+        async def stream():
+            first = await anext(upstream)
+            self.assertTrue(first.is_chunk)
+            yield Result("流式回答")
+            final = await anext(upstream)
+            self.assertFalse(final.is_chunk)
+            # Mimic AstrBot breaking at the final provider result, without
+            # advancing the provider iterator through StopAsyncIteration.
+            records = (await service.ledger({"kind": "consumption"}))["items"]
+            self.assertEqual(records[0]["status"], "settled")
+
+        async def process(_, event):
+            event.result = Result(kind="STREAMING_RESULT", stream=stream())
+            yield
+            event.result = Result("流式回答", kind="STREAMING_FINISH")
+            yield
+
+        try:
+            async for _ in self._notice_stage(process, event):
+                if event.result.async_stream:
+                    chunks.extend([part async for part in event.result.async_stream])
+                else:
+                    self.assertEqual(event.result.text(), "流式回答")
+        finally:
+            await upstream.aclose()
+        records = (await service.ledger({"kind": "consumption"}))["items"]
+        self.assertEqual(len(records), 1)
+        deduction = -records[0]["points_delta"]
+        self.assertEqual(
+            [part.text() for part in chunks], ["流式回答", f"\n[积分-{deduction:.2f}]"]
+        )
+
+    async def test_plugin_owned_stream_keeps_its_exemption_and_has_no_notice(self):
+        service, event = await self._notice_setup()
+        with self.runtime.billing_scope(event):
+            await self.provider.text_chat()
+
+        async def command(event):
+            yield ProviderRequest()
+
+        command.__module__ = "data.plugins.liuyao.main"
+
+        async def stream():
+            async for _ in self.provider.text_chat_stream():
+                pass
+            yield Result("独立插件回答")
+
+        async def process(_, event):
+            event.result = Result(kind="STREAMING_RESULT", stream=stream())
+            yield
+
+        chunks = []
+        with self.runtime.billing_scope(event):
+            async for request in self.handlers.call_handler(event, command):
+                event.set_extra("provider_request", request)
+                async for _ in self._notice_stage(process, event):
+                    chunks.extend([part async for part in event.result.async_stream])
+        self.assertEqual([part.text() for part in chunks], ["独立插件回答"])
+        self.assertEqual((await service.ledger({"kind": "consumption"}))["total"], 1)
+
+    async def test_unknown_usage_does_not_display_reserved_credit_as_spent(self):
+        service, event = await self._notice_setup()
+        provider = Provider()
+        provider.provider_config = self.provider.provider_config
+
+        async def no_usage(**kwargs):
+            return SimpleNamespace(role="assistant", usage=None)
+
+        provider.text_chat = no_usage
+        await self.manager.load_provider(provider)
+
+        async def process(_, event):
+            await provider.text_chat()
+            event.result = Result("没有用量的回答")
+            yield
+
+        async for _ in self._notice_stage(process, event):
+            self.assertEqual(event.result.text(), "没有用量的回答")
+        self.assertEqual(await service.balance("qq", "10001"), 20)
+        self.assertEqual((await service.overview())["pending_count"], 1)
+
+    async def test_concurrent_messages_keep_separate_notices_and_tiny_charges(self):
+        amounts = [Decimal("0.21"), Decimal("0.000001"), Decimal(0)]
+
+        async def settle(ticket, response, failed):
+            await asyncio.sleep(0)
+            return amounts[ticket]
+
+        self.runtime.settle = settle
+
+        async def run():
+            event = ResultEvent()
+            self.runtime.mark_chat(event)
+
+            async def process(_, event):
+                await self.provider.text_chat()
+                event.result = Result("回答")
+                yield
+
+            async for _ in self._notice_stage(process, event):
+                pass
+            return event.result.text()
+
+        outputs = await asyncio.gather(run(), run(), run())
+        self.assertCountEqual(
+            outputs, ["回答\n[积分-0.21]", "回答\n[积分-0.000001]", "回答"]
+        )
+
+    async def test_interrupted_output_stream_closes_without_a_success_notice(self):
+        service, event = await self._notice_setup()
+        closed = []
+
+        async def stream():
+            try:
+                async for response in self.provider.text_chat_stream():
+                    if response.is_chunk:
+                        yield Result("只输出一部分")
+            finally:
+                closed.append(True)
+
+        async def process(_, event):
+            event.result = Result(kind="STREAMING_RESULT", stream=stream())
+            yield
+
+        stage = self._notice_stage(process, event)
+        await anext(stage)
+        output = event.result.async_stream
+        self.assertEqual((await anext(output)).text(), "只输出一部分")
+        await output.aclose()
+        await stage.aclose()
+        self.assertEqual(closed, [True])
+        await self.runtime.drain()
+        self.assertEqual(await service.balance("qq", "10001"), 20)
 
 
 if __name__ == "__main__":

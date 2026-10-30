@@ -6,6 +6,7 @@ import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -146,7 +147,8 @@ def test_default_cost_is_212_points_and_snapshot_survives_settings_change(servic
     award(service)
     ticket = run(service.begin(Event(), "", PROVIDER, {}))
     settings(service, points_per_yuan=200)
-    run(service.settle(ticket, response(), False))
+    receipt = run(service.settle(ticket, response(), False))
+    assert receipt == Decimal("2.12")
     item = run(service.ledger({"kind": "consumption"}))["items"][0]
     assert item["points_delta"] == -2.12
     assert item["cost_yuan"] == 0.106
@@ -237,7 +239,7 @@ def test_same_user_parallel_charged_calls_denied(service):
 def test_unknown_usage_preserves_reservation_and_can_be_reconciled(service):
     award(service)
     ticket = run(service.begin(Event(), "", PROVIDER, {}))
-    run(service.settle(ticket, None, True))
+    assert run(service.settle(ticket, None, True)) is None
     report = run(service.overview())
     assert report["pending_count"] == 1
     assert report["global"]["reserved_yuan"] == 0.212
@@ -343,8 +345,8 @@ def test_failed_settlement_recovers_as_unknown_on_reload(
 def test_double_settlement_is_idempotent(service):
     award(service)
     ticket = run(service.begin(Event(), "", PROVIDER, {}))
-    run(service.settle(ticket, response(), False))
-    run(service.settle(ticket, response(), False))
+    assert run(service.settle(ticket, response(), False)) == Decimal("2.12")
+    assert run(service.settle(ticket, response(), False)) is None
     assert run(service.balance("qq", "u1")) == 17.88
 
 

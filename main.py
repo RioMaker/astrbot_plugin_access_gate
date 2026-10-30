@@ -17,7 +17,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
-PLUGIN_VERSION = "2.1.1"
+PLUGIN_VERSION = "2.2.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are

@@ -202,7 +202,7 @@ class Economy:
         try:
             usage = normalize_usage(response)
             cost = cost_yuan(usage, ticket["price"]) if usage is not None else None
-            await asyncio.to_thread(
+            settled = await asyncio.to_thread(
                 self.store.settle,
                 ticket["request_id"],
                 usage,
@@ -210,6 +210,14 @@ class Economy:
                 failed,
                 now().isoformat(),
             )
+            if settled:
+                receipt = await asyncio.to_thread(
+                    self.store.get_request, ticket["request_id"]
+                )
+                if receipt and receipt["status"] == "settled":
+                    # Use the committed deduction, including ledger rounding and
+                    # the request's original exchange rate, not a new estimate.
+                    return -Decimal(str(receipt["points_delta"]))
         except Exception:
             # Preserve this terminal failure across plugin module reloads, while
             # live requests from the same process retain their reserved state.

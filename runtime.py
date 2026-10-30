@@ -18,6 +18,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from functools import partial, wraps
 from types import SimpleNamespace
 from typing import Any
@@ -48,6 +49,21 @@ class _Invocation:
 
 
 @dataclass
+class _CreditNotice:
+    points: Decimal = Decimal(0)
+    final: bool = False
+    reported: bool = False
+
+    def text(self):
+        if self.reported or not self.final or self.points <= 0:
+            return ""
+        rounded = self.points.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # A real tiny deduction must not be presented as zero.
+        amount = format(rounded, ".2f") if rounded else format(self.points, "f")
+        return f"\n[积分-{amount}]"
+
+
+@dataclass
 class _Patch:
     target: Any
     name: str
@@ -67,7 +83,8 @@ def _field(value: Any, key: str, default: Any = None) -> Any:
 class BillingRuntime:
     """Call begin(event, plugin, provider, kwargs), then settle(ticket, reply, failed).
 
-    Both callbacks are asynchronous. Each accepted invocation settles exactly
+    Both callbacks are asynchronous; settle returns the committed Decimal
+    deduction, or None when no new deduction was made. Each invocation settles exactly
     once, even after uninstall or caller cancellation. Settlement tasks remain
     owned until completion; ``drain`` can await them during plugin shutdown.
     Unknown/expired event attribution is outside this gateway's control scope.
@@ -346,6 +363,8 @@ class BillingRuntime:
 
     def mark_chat(self, event):
         """Called only when Access Gate itself is about to initiate a chat."""
+        if event.get_extra("access_gate_credit_session") is not self._installation:
+            event.set_extra("access_gate_credit_notice", _CreditNotice())
         event.set_extra("access_gate_credit_session", self._installation)
 
     def _controlled(self):
@@ -451,8 +470,24 @@ class BillingRuntime:
         except BaseException as exc:
             self._warn(f"LLM 结算失败（{type(exc).__name__}），请核对未结算账目。")
 
-    async def _finish(self, ticket, response, failed):
-        task = asyncio.create_task(self.settle(ticket, response, failed))
+    def _notice(self):
+        if not self._controlled():
+            return None
+        return self._live_scope().event.get_extra("access_gate_credit_notice")
+
+    async def _finish(self, ticket, response, failed, notice):
+        async def settle_and_record():
+            deduction = await self.settle(ticket, response, failed)
+            if notice is not None:
+                if deduction is not None:
+                    notice.points += deduction
+                notice.final = (
+                    not failed
+                    and _field(response, "role") == "assistant"
+                    and not _field(response, "tools_call_name")
+                )
+
+        task = asyncio.create_task(settle_and_record())
         self._pending.add(task)
         task.add_done_callback(self._settled)
         # A second cancellation may interrupt this waiter, but never cancels the
@@ -704,6 +739,8 @@ class BillingRuntime:
                     )
                     try:
                         response = await anext(iterator)
+                        if self._enabled(installation):
+                            self._prepare_result(event, scope, installation)
                     except StopAsyncIteration:
                         break
                     finally:
@@ -721,6 +758,70 @@ class BillingRuntime:
                         lifetime.active = False
 
         return process
+
+    def _prepare_result(self, event, scope, installation):
+        getter = getattr(event, "get_result", None)
+        result = getter() if callable(getter) else None
+        if result is None:
+            return
+        kind = getattr(getattr(result, "result_content_type", None), "name", "")
+        notice = self._notice()
+        if kind == "STREAMING_RESULT":
+            stream = result.async_stream
+            if (
+                stream is not None
+                and event.get_extra("access_gate_credit_stream") is not stream
+            ):
+                result.async_stream = self._result_stream(
+                    stream, event, scope, installation, notice
+                )
+                event.set_extra("access_gate_credit_stream", result.async_stream)
+        elif kind == "LLM_RESULT" and result.chain and notice is not None:
+            suffix = notice.text()
+            if not suffix:
+                return
+            # The message chain can be shared with the provider/history. Decorate
+            # a copy so the receipt never becomes model context or a tool result.
+            chain = list(result.chain)
+            if type(chain[-1]).__name__ == "Plain":
+                chain[-1] = copy.copy(chain[-1])
+                chain[-1].text += suffix
+            else:
+                chain.extend(event.plain_result(suffix).chain)
+            result.chain = chain
+            notice.reported = True
+
+    async def _result_stream(self, stream, event, scope, installation, notice):
+        iterator = stream.__aiter__()
+        try:
+            while True:
+                token = self._scope.set(scope) if self._enabled(installation) else None
+                try:
+                    chunk = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                finally:
+                    if token is not None:
+                        self._scope.reset(token)
+                yield chunk
+            if (
+                self._enabled(installation)
+                and scope.lifetime.active
+                and notice is not None
+            ):
+                suffix = notice.text()
+                if suffix:
+                    notice.reported = True
+                    yield event.plain_result(suffix)
+        finally:
+            token = self._scope.set(scope) if self._enabled(installation) else None
+            try:
+                close = getattr(iterator, "aclose", None)
+                if callable(close):
+                    await close()
+            finally:
+                if token is not None:
+                    self._scope.reset(token)
 
     @staticmethod
     def _call_kwargs(original, args, kwargs):
@@ -748,6 +849,9 @@ class BillingRuntime:
             ticket = await self._begin(
                 provider, self._call_kwargs(original, args, kwargs)
             )
+            notice = self._notice()
+            if notice is not None:
+                notice.final = False
             call = _Invocation(provider, asyncio.current_task())
             token = self._calls.set(self._calls.get() + (call,))
             self._inflight += 1
@@ -761,7 +865,7 @@ class BillingRuntime:
                 call.active = False
                 self._calls.reset(token)
                 self._inflight -= 1
-                await self._finish(ticket, response, failed)
+                await self._finish(ticket, response, failed, notice)
 
         return text_chat
 
@@ -779,6 +883,7 @@ class BillingRuntime:
                 if raw is not None
                 else None,
                 role=_field(response, "role"),
+                tools_call_name=copy.deepcopy(_field(response, "tools_call_name")),
                 id=_field(response, "id"),
                 is_chunk=bool(_field(response, "is_chunk", False)),
             )
@@ -805,12 +910,16 @@ class BillingRuntime:
             ticket = await self._begin(
                 provider, self._call_kwargs(original, args, kwargs)
             )
+            notice = self._notice()
+            if notice is not None:
+                notice.final = False
             call = _Invocation(provider, asyncio.current_task())
             if observe:
                 self._inflight += 1
             iterator = original(*args, **kwargs)
             final_response = None
             failed = True
+            settled = False
             try:
                 while True:
                     call.task = asyncio.current_task()
@@ -824,6 +933,16 @@ class BillingRuntime:
                         self._calls.reset(token)
                     if observe and not _field(response, "is_chunk", False):
                         final_response = self._snapshot(response)
+                        # Agent runners may break immediately after this final
+                        # response. Commit its usage before handing it downstream.
+                        if not settled:
+                            settled = True
+                            await self._finish(
+                                ticket,
+                                final_response,
+                                _field(final_response, "role") == "err",
+                                notice,
+                            )
                     yield response
             finally:
                 call.task = asyncio.current_task()
@@ -835,6 +954,7 @@ class BillingRuntime:
                     call.active = False
                     if observe:
                         self._inflight -= 1
-                        await self._finish(ticket, final_response, failed)
+                        if not settled:
+                            await self._finish(ticket, final_response, failed, notice)
 
         return text_chat_stream

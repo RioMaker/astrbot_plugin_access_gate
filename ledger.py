@@ -21,6 +21,10 @@ if not hasattr(sys, "_access_gate_failed_requests"):
 FAILED_REQUESTS = sys._access_gate_failed_requests
 
 
+class InsufficientPointsError(ValueError):
+    """Admission failed because the user's spendable points are exhausted."""
+
+
 def units(value, scale):
     return int((Decimal(str(value)) * scale).to_integral_value(rounding=ROUND_HALF_UP))
 
@@ -254,7 +258,9 @@ class Ledger:
                     )
             if charged:
                 if balance <= 0:
-                    raise ValueError("积分不足，请先通过 /rp 获取今日积分。")
+                    raise InsufficientPointsError(
+                        "积分不足，请先通过 /rp 获取今日积分。"
+                    )
                 row = self.db.execute(
                     "SELECT 1 FROM ledger WHERE platform=? AND user_id=? AND charged=1 AND status IN ('reserved','unknown') LIMIT 1",
                     (identity["platform"], identity["user_id"]),

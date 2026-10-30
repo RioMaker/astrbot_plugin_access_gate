@@ -225,8 +225,9 @@ def test_one_positive_balance_allows_finish_then_debt_blocks_next(service):
     ticket = run(service.begin(Event(), "", PROVIDER, {}))
     run(service.settle(ticket, response(), False))
     assert run(service.balance("qq", "u1")) == -2.11
-    with pytest.raises(RuntimeGateDenied, match="积分不足"):
+    with pytest.raises(RuntimeGateDenied, match="积分不足") as denied:
         run(service.begin(Event(), "", PROVIDER, {}))
+    assert denied.value.reason == "insufficient_points"
 
 
 def test_same_user_parallel_charged_calls_denied(service):

@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from .ledger import FAILED_REQUESTS, Ledger
+from .ledger import FAILED_REQUESTS, InsufficientPointsError, Ledger
 from .pricing import (
     DEFAULTS,
     cost_yuan,
@@ -194,7 +194,12 @@ class Economy:
                 raise
             return {"request_id": request_id, "price": price}
         except ValueError as exc:
-            raise RuntimeGateDenied(str(exc)) from None
+            reason = (
+                "insufficient_points"
+                if isinstance(exc, InsufficientPointsError)
+                else ""
+            )
+            raise RuntimeGateDenied(str(exc), reason=reason) from None
 
     async def settle(self, ticket, response, failed):
         if ticket is None:

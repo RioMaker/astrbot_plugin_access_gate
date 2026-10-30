@@ -14,6 +14,7 @@ import asyncio
 import copy
 import importlib
 import inspect
+import logging
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -26,6 +27,10 @@ from typing import Any
 
 class RuntimeGateDenied(RuntimeError):
     """A safe, user-facing rejection raised before any upstream request."""
+
+    def __init__(self, message, *, reason=""):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -54,8 +59,8 @@ class _CreditNotice:
     final: bool = False
     reported: bool = False
 
-    def text(self):
-        if self.reported or not self.final or self.points <= 0:
+    def text(self, *, completed=False):
+        if self.reported or (not self.final and not completed) or self.points <= 0:
             return ""
         rounded = self.points.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         # A real tiny deduction must not be presented as zero.
@@ -90,11 +95,20 @@ class BillingRuntime:
     Unknown/expired event attribution is outside this gateway's control scope.
     """
 
-    def __init__(self, context, begin: Callable, settle: Callable, on_error=None):
+    def __init__(
+        self,
+        context,
+        begin: Callable,
+        settle: Callable,
+        on_error=None,
+        *,
+        can_notify=None,
+    ):
         self.context = context
         self.begin = begin
         self.settle = settle
         self.on_error = on_error
+        self.can_notify = can_notify
         self.active = False
         self._installation: _Lifetime | None = None
         self._scope: ContextVar[_Scope | None] = ContextVar(
@@ -167,6 +181,9 @@ class BillingRuntime:
             request_type = importlib.import_module(
                 "astrbot.core.provider.entities"
             ).ProviderRequest
+            respond_stage = importlib.import_module(
+                "astrbot.core.pipeline.respond.stage"
+            ).RespondStage
             if not inspect.iscoroutinefunction(scheduler.PipelineScheduler.execute):
                 raise TypeError("scheduler")
             if not inspect.isasyncgenfunction(handlers.call_handler):
@@ -179,6 +196,8 @@ class BillingRuntime:
                 request_type, type
             ):
                 raise TypeError("plugin provider request")
+            if not inspect.iscoroutinefunction(respond_stage.process):
+                raise TypeError("response delivery")
             manager = self.context.provider_manager
             if not inspect.iscoroutinefunction(manager.load_provider):
                 raise TypeError("provider loading")
@@ -224,6 +243,11 @@ class BillingRuntime:
                 request_stage,
                 "process",
                 self._wrap_request_process(request_stage.process, installation),
+            )
+            self._patch(
+                respond_stage,
+                "process",
+                self._wrap_respond(respond_stage.process, installation),
             )
             self._requests_ready = True
             self._refresh(providers, installation)
@@ -439,12 +463,14 @@ class BillingRuntime:
         if event is None:
             return
         scope = self._live_scope()
-        if scope and scope.lifetime.denied:
-            return
-        if scope:
-            scope.lifetime.denied = True
         try:
             event.stop_event()
+            if scope and scope.lifetime.denied:
+                return
+            if scope:
+                scope.lifetime.denied = True
+            if self.can_notify is not None and not self.can_notify(event, error):
+                return
             await event.send(event.plain_result(str(error)[:240]))
         except Exception as exc:
             self._warn(f"额度拦截提示发送失败（{type(exc).__name__}）。")
@@ -509,7 +535,9 @@ class BillingRuntime:
             self.refresh()
             with self.billing_scope(event):
                 try:
-                    return await original(scheduler, event, *args, **kwargs)
+                    result = await original(scheduler, event, *args, **kwargs)
+                    await self._send_missing_notice(event, installation)
+                    return result
                 except RuntimeGateDenied as exc:
                     await self._denied(event, exc)
                     return None
@@ -742,6 +770,9 @@ class BillingRuntime:
                         if self._enabled(installation):
                             self._prepare_result(event, scope, installation)
                     except StopAsyncIteration:
+                        # Some stages leave a final result without another yield.
+                        if self._enabled(installation):
+                            self._prepare_result(event, scope, installation)
                         break
                     finally:
                         if token is not None:
@@ -762,6 +793,7 @@ class BillingRuntime:
     def _prepare_result(self, event, scope, installation):
         getter = getattr(event, "get_result", None)
         result = getter() if callable(getter) else None
+        event.set_extra("access_gate_credit_result", None)
         if result is None:
             return
         kind = getattr(getattr(result, "result_content_type", None), "name", "")
@@ -776,20 +808,109 @@ class BillingRuntime:
                     stream, event, scope, installation, notice
                 )
                 event.set_extra("access_gate_credit_stream", result.async_stream)
-        elif kind == "LLM_RESULT" and result.chain and notice is not None:
+        elif kind == "LLM_RESULT" and notice is not None:
+            # Bind the origin now, but wait until *after* result decorators and
+            # text/image/voice conversion before adding the receipt.
+            event.set_extra("access_gate_credit_result", notice)
+
+    @staticmethod
+    def _plain_text(message):
+        return "".join(
+            str(getattr(part, "text", ""))
+            for part in getattr(message, "chain", ())
+            if type(part).__name__ == "Plain"
+        )
+
+    def _wrap_respond(self, original, installation):
+        @wraps(original)
+        async def respond(stage, event, *args, **kwargs):
+            notice = event.get_extra("access_gate_credit_result")
+            event.set_extra("access_gate_credit_result", None)
+            result = event.get_result()
+            if (
+                not self._enabled(installation)
+                or notice is None
+                or notice is not event.get_extra("access_gate_credit_notice")
+                or result is None
+                or not result.chain
+                or event.is_stopped()
+            ):
+                return await original(stage, event, *args, **kwargs)
             suffix = notice.text()
             if not suffix:
-                return
-            # The message chain can be shared with the provider/history. Decorate
-            # a copy so the receipt never becomes model context or a tool result.
-            chain = list(result.chain)
-            if type(chain[-1]).__name__ == "Plain":
-                chain[-1] = copy.copy(chain[-1])
-                chain[-1].text += suffix
-            else:
-                chain.extend(event.plain_result(suffix).chain)
-            result.chain = chain
+                return await original(stage, event, *args, **kwargs)
+            sent_texts = event.get_extra(
+                "_send_message_to_user_current_session_plain_texts"
+            )
+            if (
+                isinstance(sent_texts, list)
+                and self._plain_text(result).strip() in sent_texts
+                and all(
+                    type(part).__name__ in {"Plain", "At", "Reply"}
+                    for part in result.chain
+                )
+            ):
+                # Preserve Core's duplicate-text suppression; the end-of-turn
+                # fallback will deliver just the receipt after the direct send.
+                return await original(stage, event, *args, **kwargs)
+
+            if not self._plain_text(result).endswith(suffix):
+                chain = list(result.chain)
+                if type(chain[-1]).__name__ == "Plain":
+                    chain[-1] = copy.copy(chain[-1])
+                    chain[-1].text += suffix
+                else:
+                    chain.extend(event.plain_result(suffix).chain)
+                result.chain = chain
+
+            original_send = event.send
+            owned = "send" in vars(event)
+
+            @wraps(original_send)
+            async def send(message, *send_args, **send_kwargs):
+                returned = await original_send(message, *send_args, **send_kwargs)
+                if suffix.strip() in self._plain_text(message):
+                    notice.reported = True
+                return returned
+
+            event.send = send
+            try:
+                return await original(stage, event, *args, **kwargs)
+            finally:
+                if event.send is send:
+                    if owned:
+                        event.send = original_send
+                    else:
+                        del event.send
+
+        return respond
+
+    async def _send_missing_notice(self, event, installation):
+        if (
+            not self._enabled(installation)
+            or event.get_extra("access_gate_credit_session") is not installation
+            or event.is_stopped()
+            or not getattr(event, "_has_send_oper", False)
+        ):
+            return
+        notice = event.get_extra("access_gate_credit_notice")
+        suffix = notice.text(completed=True) if notice is not None else ""
+        if not suffix:
+            return
+        try:
+            await event.send(event.plain_result(suffix.lstrip()))
             notice.reported = True
+        except Exception as exc:
+            # A failed optional footer must not disable future paid chats.
+            if self.on_error:
+                try:
+                    result = self.on_error(
+                        f"积分消耗提示发送失败（{type(exc).__name__}）。"
+                    )
+                    if inspect.iscoroutine(result):
+                        result.close()
+                except Exception:
+                    logging.getLogger(__name__).exception("积分消耗提示错误回调失败。")
 
     async def _result_stream(self, stream, event, scope, installation, notice):
         iterator = stream.__aiter__()

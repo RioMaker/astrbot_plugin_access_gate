@@ -42,6 +42,9 @@ class Event:
     def stop_event(self):
         self.stopped = True
 
+    def is_stopped(self):
+        return self.stopped
+
     def get_sender_id(self):
         return "10001"
 
@@ -62,6 +65,7 @@ class Event:
 
     async def send(self, text):
         self.sent.append(text)
+        self._has_send_oper = True
 
 
 class ProviderRequest:
@@ -135,6 +139,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.provider.text_chat()
                 yield None
 
+        class RespondStage:
+            async def process(_, event):
+                result = event.get_result()
+                sent_texts = event.get_extra(
+                    "_send_message_to_user_current_session_plain_texts"
+                )
+                if (
+                    result
+                    and isinstance(sent_texts, list)
+                    and result.text().strip() in sent_texts
+                ):
+                    return
+                if (
+                    result
+                    and result.chain
+                    and result.result_content_type.name != "STREAMING_FINISH"
+                ):
+                    await event.send(result)
+
         async def call_handler(event, handler, **kwargs):
             result = handler(event, **kwargs)
             if inspect.isasyncgen(result):
@@ -164,6 +187,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         request_entities = ModuleType("entities")
         request_entities.ProviderRequest = ProviderRequest
         self.agent_stage = AgentRequestStage()
+        respond_module = ModuleType("respond")
+        respond_module.RespondStage = RespondStage
+        self.respond_stage = RespondStage()
         modules = {
             "astrbot.core.pipeline.scheduler": scheduler_module,
             "astrbot.core.pipeline.process_stage.method.star_request": self.handlers,
@@ -171,6 +197,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "astrbot.core.star.star_handler": registry_module,
             "astrbot.core.pipeline.process_stage.method.agent_request": request_stage_module,
             "astrbot.core.provider.entities": request_entities,
+            "astrbot.core.pipeline.respond.stage": respond_module,
         }
         self.modules = patch.dict(sys.modules, modules)
         self.modules.start()
@@ -794,11 +821,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         return service, event
 
-    def _notice_stage(self, process, event):
+    async def _notice_stage(self, process, event, *, deliver=True):
         wrapped = self.runtime._wrap_request_process(
             process, self.runtime._installation
         )
-        return wrapped(None, event)
+        async for item in wrapped(None, event):
+            if deliver:
+                await self.respond_stage.process(event)
+            yield item
 
     async def test_final_notice_sums_ledger_and_excludes_independent_tool_cost(self):
         service, event = await self._notice_setup()
@@ -972,6 +1002,169 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(closed, [True])
         await self.runtime.drain()
         self.assertEqual(await service.balance("qq", "10001"), 20)
+
+    async def test_plain_reply_rebuilt_by_decorator_keeps_its_credit_notice(self):
+        service, event = await self._notice_setup()
+
+        async def process(_, event):
+            await self.provider.text_chat()
+            event.result = Result("原始正文")
+            yield
+
+        async def action():
+            async for _ in self._notice_stage(process, event, deliver=False):
+                # on_decorating_result may rebuild even an ordinary text chain.
+                event.result = Result("整理后的文字", kind="GENERAL_RESULT")
+                await self.respond_stage.process(event)
+
+        event.action = action
+        await self.scheduler.execute(event)
+        records = (await service.ledger({"kind": "consumption"}))["items"]
+        deduction = -records[0]["points_delta"]
+        self.assertEqual(
+            [result.text() for result in event.sent],
+            [f"整理后的文字\n[积分-{deduction:.2f}]"],
+        )
+        self.assertNotIn("send", vars(event))
+
+    async def test_direct_text_delivery_gets_one_final_receipt(self):
+        service, event = await self._notice_setup()
+
+        async def action():
+            self.provider.tools_call_name = ["send_message_to_user"]
+            await self.provider.text_chat()
+            await event.send(event.plain_result("直接发送的文字"))
+
+        event.action = action
+        await self.scheduler.execute(event)
+        await self.runtime._send_missing_notice(event, self.runtime._installation)
+        records = (await service.ledger({"kind": "consumption"}))["items"]
+        deduction = -records[0]["points_delta"]
+        self.assertEqual(
+            [result.text() for result in event.sent],
+            ["直接发送的文字", f"[积分-{deduction:.2f}]"],
+        )
+
+    async def test_duplicate_direct_text_is_not_resent_just_to_attach_receipt(self):
+        service, event = await self._notice_setup()
+
+        async def process(_, event):
+            await self.provider.text_chat()
+            event.result = Result("已经发送的文字")
+            yield
+
+        async def action():
+            await event.send(event.plain_result("已经发送的文字"))
+            event.set_extra(
+                "_send_message_to_user_current_session_plain_texts", ["已经发送的文字"]
+            )
+            async for _ in self._notice_stage(process, event):
+                pass
+
+        event.action = action
+        await self.scheduler.execute(event)
+        records = (await service.ledger({"kind": "consumption"}))["items"]
+        deduction = -records[0]["points_delta"]
+        self.assertEqual(
+            [result.text() for result in event.sent],
+            ["已经发送的文字", f"[积分-{deduction:.2f}]"],
+        )
+
+    async def test_result_left_when_agent_returns_still_gets_a_notice(self):
+        _, event = await self._notice_setup()
+
+        async def process(_, event):
+            yield
+            await self.provider.text_chat()
+            event.result = Result("末尾直接留下的文字")
+
+        async def action():
+            async for _ in self._notice_stage(process, event):
+                pass
+            await self.respond_stage.process(event)
+
+        event.action = action
+        await self.scheduler.execute(event)
+        self.assertEqual(len(event.sent), 1)
+        self.assertIn("[积分-", event.sent[0].text())
+
+    async def test_notice_is_confirmed_only_after_send_and_retry_does_not_duplicate(
+        self,
+    ):
+        _, event = await self._notice_setup()
+        original_send = event.send
+
+        async def failed_send(message):
+            raise OSError("temporary platform failure")
+
+        async def process(_, event):
+            await self.provider.text_chat()
+            event.result = Result("正文")
+            yield
+            yield
+
+        stage = self._notice_stage(process, event, deliver=False)
+        await anext(stage)
+        event.send = failed_send
+        with self.assertRaises(OSError):
+            await self.respond_stage.process(event)
+        self.assertIs(event.send, failed_send)
+        self.assertFalse(event.get_extra("access_gate_credit_notice").reported)
+        event.send = original_send
+        await anext(stage)
+        await self.respond_stage.process(event)
+        await stage.aclose()
+        self.assertEqual(len(event.sent), 1)
+        self.assertEqual(event.sent[0].text().count("[积分-"), 1)
+        self.assertTrue(event.get_extra("access_gate_credit_notice").reported)
+        self.assertTrue(self.runtime.status()["complete"])
+
+    async def test_blocked_or_silent_events_do_not_emit_a_standalone_receipt(self):
+        for stopped in (True, False):
+            with self.subTest(stopped=stopped):
+                _, event = await self._notice_setup()
+
+                async def action(*, current_event=event, should_stop=stopped):
+                    await self.provider.text_chat()
+                    if should_stop:
+                        current_event.stop_event()
+                        await current_event.send(current_event.plain_result("已停止"))
+
+                event.action = action
+                await self.scheduler.execute(event)
+                self.assertEqual(
+                    [result.text() for result in event.sent],
+                    ["已停止"] if stopped else [],
+                )
+
+    async def test_denial_cooldown_suppresses_sends_but_always_blocks_provider(self):
+        from test_access_gate import main as plugin_main
+        from test_group_rest import GroupEvent
+        from test_wake import At, Context
+        from test_wake import Plain as EventPlain
+
+        await self._attach_economy()
+        gate = plugin_main.AccessGatePlugin(Context("", {}), {})
+        self.runtime.can_notify = gate._credit_denial_notice_allowed
+        events = []
+
+        async def attempt():
+            event = GroupEvent()
+            event.message_obj.message = [At(), EventPlain("你好")]
+            self.runtime.mark_chat(event)
+            event.action = self.provider.text_chat
+            events.append(event)
+            await self.scheduler.execute(event)
+
+        with patch.object(plugin_main, "monotonic", return_value=1000):
+            await asyncio.gather(*(attempt() for _ in range(8)))
+        self.assertEqual(sum(len(event.sent) for event in events), 1)
+        self.assertTrue(all(event.is_stopped() for event in events))
+        self.assertEqual(self.provider.requests, 0)
+        with patch.object(plugin_main, "monotonic", return_value=1300):
+            await attempt()
+        self.assertEqual(len(events[-1].sent), 1)
+        self.assertEqual(self.provider.requests, 0)
 
 
 if __name__ == "__main__":

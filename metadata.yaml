@@ -2,7 +2,7 @@ name: astrbot_plugin_access_gate
 display_name: 门禁与积分额度管理
 short_desc: 白名单、RP 积分、LLM 成本与全局及群每日额度。
 desc: 独立白名单和唤醒、RP 每日积分奖励、按实际 token 成本扣分、全局及群日额度、管理页面与审计流水。
-version: "2.2.0"
+version: "2.2.1"
 author: Rio
 repo: ""
 astrbot_version: ">=4.24.0"

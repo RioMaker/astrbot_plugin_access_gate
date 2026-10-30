@@ -4,9 +4,11 @@ import asyncio
 import json
 import re
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -17,7 +19,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
-PLUGIN_VERSION = "2.2.0"
+PLUGIN_VERSION = "2.2.1"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -98,6 +100,7 @@ class AccessGatePlugin(Star):
         self.billing_runtime = None
         self.rp_bridge = None
         self.admin_api = None
+        self._credit_denial_notices = OrderedDict()
         logger.info(
             "[access_gate] 已加载；请确保 AstrBot 核心 enable_id_white_list 已关闭"
         )
@@ -120,6 +123,7 @@ class AccessGatePlugin(Star):
             self._begin_credit_call,
             self.economy.settle,
             self._credit_error,
+            can_notify=self._credit_denial_notice_allowed,
         )
         if self._bool("credits_enabled", True):
             self.billing_runtime.install()
@@ -131,6 +135,39 @@ class AccessGatePlugin(Star):
     @staticmethod
     def _credit_error(message):
         logger.error(f"[access_gate] {message}")
+
+    def _credit_denial_notice_allowed(self, event, error):
+        if getattr(error, "reason", "") != "insufficient_points" or not self._at_self(
+            event
+        ):
+            return True
+        interval = self.config.get("credits_insufficient_notice_interval", 300)
+        if (
+            isinstance(interval, bool)
+            or not isinstance(interval, int)
+            or not 0 <= interval <= 86400
+        ):
+            interval = 300
+        if interval == 0:
+            return True
+        key = (
+            str(event.get_platform_name() or ""),
+            str(event.get_self_id() or ""),
+            str(event.get_group_id() or ""),
+            str(event.get_sender_id() or ""),
+        )
+        current = monotonic()
+        notices = self._credit_denial_notices
+        while notices and next(iter(notices.values())) <= current - interval:
+            notices.popitem(last=False)
+        if key in notices:
+            return False
+        # Reserve the slot before awaiting send, so concurrent @ messages cannot
+        # all emit a warning. This is a fixed window, not a sliding mute timer.
+        notices[key] = current
+        while len(notices) > 4096:
+            notices.popitem(last=False)
+        return True
 
     async def _begin_credit_call(self, event, plugin, provider, kwargs):
         if not self._bool("credits_enabled", True):

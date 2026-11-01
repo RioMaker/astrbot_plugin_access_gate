@@ -19,6 +19,14 @@ const { chromium } = require("playwright");
     assert.equal(await page.locator('#plugins-list input').count(), 0);
     assert.match(await page.locator('#plugins-list').innerText(), /六爻[\s\S]*独立调用放行/);
     assert.match(await page.locator('#overview').innerText(), /不扣积分、不占额度、不新增流水/);
+    assert.match(await page.locator('#groups-body tr').nth(0).innerText(), /太鼓达人交流①群 🥁[\s\S]*qq · 群号 10002000/);
+    assert.match(await page.locator('#groups-body tr').nth(1).innerText(), /<img src=x onerror=alert\(1\)>[\s\S]*10003000/);
+    assert.match(await page.locator('#groups-body tr').nth(2).innerText(), /群名称暂不可用[\s\S]*10004000/);
+    assert.match(await page.locator('#ledger-body tr').nth(0).locator('td').nth(1).innerText(), /太鼓达人交流①群 🥁[\s\S]*群号 10002000/);
+    assert.match(await page.locator('#ledger-body tr').nth(1).locator('td').nth(1).innerText(), /<img src=x onerror=alert\(1\)>[\s\S]*10003000/);
+    assert.match(await page.locator('#ledger-body tr').nth(2).locator('td').nth(1).innerText(), /私聊 \/ 无群/);
+    assert.equal(await page.locator('#groups-body img, #ledger-body img').count(), 0);
+    if (process.env.CREDITS_SCREENSHOT) await page.locator('#overview').screenshot({ path: process.env.CREDITS_SCREENSHOT });
     await page.locator('#settings-form input[name="points_per_yuan"]').fill("40");
     assert.match(await page.locator("#mapping").innerText(), /8\.48/);
     await page.locator('#settings-form button[type="submit"]').click();
@@ -42,7 +50,7 @@ const { chromium } = require("playwright");
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 390));
     await page.evaluate(() => document.documentElement.dataset.theme = "dark");
     assert.equal(errors.length, 0, errors.join("\n"));
-    console.log("Credits UI: mapping, plugin passthrough, adjustment, reconciliation, XSS text, mobile layout passed.");
+    console.log("Credits UI: group names and IDs, missing names, private chat, mapping, plugin passthrough, adjustment, reconciliation, XSS text, mobile layout passed.");
   } finally {
     await browser.close();
   }

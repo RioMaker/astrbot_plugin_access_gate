@@ -1,13 +1,15 @@
 """Exercise Dashboard authorization and the service boundary without AstrBot."""
 
+import asyncio
+import copy
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from admin_api import AdminAPI
+from admin_api import AdminAPI, GroupNames
 
 
 class FakeRequest:
@@ -57,6 +59,19 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.api = AdminAPI(self.plugin, web)
+
+    def connect_bot(self, rows, *, bot_ids=("90001",), platform="aiocqhttp"):
+        client = SimpleNamespace(
+            call_action=AsyncMock(return_value=rows),
+            _wsr_api_clients=dict.fromkeys(bot_ids),
+        )
+        adapter = SimpleNamespace(
+            meta=lambda: SimpleNamespace(name=platform), get_client=lambda: client
+        )
+        self.plugin.context.platform_manager = SimpleNamespace(
+            get_insts=lambda: [adapter]
+        )
+        return client
 
     def test_registers_distinct_get_and_post_routes(self):
         self.api.register()
@@ -122,6 +137,142 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
         result = await self.api.overview()
         self.assertEqual(result["body"]["integration"], {"rp_connected": True})
         self.assertNotIn("integration", source)
+
+    async def test_group_names_enrich_overview_and_history_without_mutating_records(
+        self,
+    ):
+        client = self.connect_bot(
+            [{"group_id": 123456, "group_name": "  太鼓交流群  "}]
+        )
+        groups = [
+            {"platform": platform, "group_id": "123456", "spent_yuan": 0.106}
+            for platform in ("qq", "aiocqhttp", "", "telegram")
+        ]
+        groups.append({"platform": "qq", "group_id": "999999"})
+        entries = [
+            {"platform": "qq", "group_id": "123456", "details": {"cost": 0.106}},
+            {"platform": "qq", "group_id": ""},
+        ]
+        before = copy.deepcopy((groups, entries))
+        self.economy.overview.return_value = {"groups": groups}
+        self.economy.ledger.return_value = {"items": entries, "page": 2, "total": 2}
+        overview, ledger = await asyncio.gather(self.api.overview(), self.api.ledger())
+        self.assertEqual(
+            [row["group_name"] for row in overview["body"]["groups"]],
+            ["太鼓交流群", "太鼓交流群", "太鼓交流群", "", ""],
+        )
+        self.assertEqual(
+            [row["group_name"] for row in ledger["body"]["items"]], ["太鼓交流群", ""]
+        )
+        self.assertEqual(ledger["body"]["page"], 2)
+        self.assertEqual((groups, entries), before)
+        client.call_action.assert_awaited_once_with("get_group_list", self_id="90001")
+
+    async def test_group_names_refresh_after_cache_expiry_and_keep_last_known_on_failure(
+        self,
+    ):
+        client = self.connect_bot([{"group_id": 123456, "group_name": "原群名称"}])
+        self.economy.overview.return_value = {
+            "groups": [{"platform": "qq", "group_id": "123456"}]
+        }
+        with patch("admin_api.monotonic", return_value=100) as clock:
+            await self.api.overview()
+            client.call_action.return_value = [
+                {"group_id": 123456, "group_name": "新群名称"}
+            ]
+            clock.return_value = 159
+            self.assertEqual(
+                (await self.api.overview())["body"]["groups"][0]["group_name"],
+                "原群名称",
+            )
+            clock.return_value = 161
+            self.assertEqual(
+                (await self.api.overview())["body"]["groups"][0]["group_name"],
+                "新群名称",
+            )
+            client.call_action.side_effect = RuntimeError("private connection token")
+            clock.return_value = 222
+            result = await self.api.overview()
+            self.assertEqual(result["status"], 200)
+            self.assertEqual(result["body"]["groups"][0]["group_name"], "新群名称")
+            self.assertNotIn("private connection", str(result))
+
+    async def test_group_lookup_queries_each_connected_bot_and_skips_malformed_names(
+        self,
+    ):
+        client = self.connect_bot([], bot_ids=("90001", "90002"))
+        client.call_action.side_effect = [
+            [
+                {"group_id": 123456, "group_name": "第一群"},
+                None,
+                {"group_id": True, "group_name": "bad"},
+            ],
+            {
+                "status": "ok",
+                "data": [
+                    {"group_id": "654321", "group_name": "第二群"},
+                    {"group_id": "7", "group_name": []},
+                ],
+            },
+        ]
+        self.economy.overview.return_value = {
+            "groups": [
+                {"platform": "qq", "group_id": value}
+                for value in ("123456", "654321", "7")
+            ]
+        }
+        result = await self.api.overview()
+        self.assertEqual(
+            [row["group_name"] for row in result["body"]["groups"]],
+            ["第一群", "第二群", ""],
+        )
+        self.assertEqual(client.call_action.await_count, 2)
+        self.assertEqual(
+            {call.kwargs["self_id"] for call in client.call_action.await_args_list},
+            {"90001", "90002"},
+        )
+
+    async def test_group_lookup_timeout_does_not_break_credit_data(self):
+        client = self.connect_bot([])
+        cancelled = asyncio.Event()
+
+        async def unavailable(*args, **kwargs):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        client.call_action.side_effect = unavailable
+        self.economy.overview.return_value = {
+            "global": {"spent_yuan": 0.106},
+            "groups": [{"platform": "qq", "group_id": "123456"}],
+        }
+        with patch.object(GroupNames, "LOOKUP_TIMEOUT", 0.01):
+            result = await asyncio.wait_for(self.api.overview(), timeout=1)
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["body"]["global"]["spent_yuan"], 0.106)
+        self.assertEqual(result["body"]["groups"][0]["group_name"], "")
+
+    async def test_unauthorized_requests_do_not_query_bot_metadata(self):
+        client = self.connect_bot([])
+        self.request.username = ""
+        self.assertEqual((await self.api.overview())["status"], 403)
+        self.assertEqual((await self.api.ledger())["status"], 403)
+        client.call_action.assert_not_called()
+
+    async def test_unsupported_or_disconnected_platform_keeps_group_id(self):
+        self.economy.overview.return_value = {
+            "groups": [{"platform": "qq", "group_id": "123456"}]
+        }
+        for platform, bot_ids in (("telegram", ("90001",)), ("aiocqhttp", ())):
+            client = self.connect_bot([], platform=platform, bot_ids=bot_ids)
+            self.api.group_names.refresh_at = 0
+            row = (await self.api.overview())["body"]["groups"][0]
+            self.assertEqual(
+                row, {"platform": "qq", "group_id": "123456", "group_name": ""}
+            )
+            client.call_action.assert_not_called()
 
     async def test_search_and_pagination_are_bounded(self):
         self.request.query = {"query": "  用户1  ", "page": "2"}

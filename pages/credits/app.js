@@ -35,6 +35,13 @@ function empty(tbody, columns, text = "暂无记录") {
   const row = element("tr"); row.append(cell); tbody.append(row);
 }
 function cells(row, values) { for (const value of values) row.append(element("td", value)); }
+function groupIdentity(group, showPlatform = false) {
+  const item = element("div", undefined, "group-identity");
+  if (!group.group_id) { item.textContent = "私聊 / 无群"; return item; }
+  item.append(element("span", group.group_name || "群名称暂不可用", "group-name"));
+  item.append(element("small", `${showPlatform ? `${group.platform || "—"} · ` : ""}群号 ${group.group_id}`, "group-id"));
+  return item;
+}
 function pagination(prefix, data) {
   const page = Number(data.page || 1), total = Number(data.total || 0), size = Number(data.page_size || 30);
   $(`${prefix}-page`).textContent = `第 ${page} 页 · 共 ${total} 条`;
@@ -59,7 +66,8 @@ async function loadOverview() {
   const body = $("groups-body"); body.replaceChildren();
   for (const group of data.groups || []) {
     const row = element("tr");
-    cells(row, [`${group.platform || "—"} / ${group.group_id}`, group.is_override ? "指定群额度" : "默认额度", money(group.limit_yuan), money(group.spent_yuan), money(group.reserved_yuan), money(group.remaining_yuan)]);
+    const identity = element("td"); identity.append(groupIdentity(group, true)); row.append(identity);
+    cells(row, [group.is_override ? "指定群额度" : "默认额度", money(group.limit_yuan), money(group.spent_yuan), money(group.reserved_yuan), money(group.remaining_yuan)]);
     body.append(row);
   }
   if (!body.children.length) empty(body, 6, "暂无群消费记录；默认额度和指定群额度可在下方设置");
@@ -88,7 +96,10 @@ async function loadLedger() {
   const body = $("ledger-body"); body.replaceChildren();
   for (const entry of data.items || []) {
     const row = element("tr");
-    cells(row, [beijingTime(entry.occurred_at), `${entry.platform || "—"} · ${entry.user_id || "无用户"}\n群 ${entry.group_id || "私聊 / 无群"}`, `${entry.source_plugin || "普通对话"}\n${kinds[entry.kind] || entry.kind || "—"}`]);
+    cells(row, [beijingTime(entry.occurred_at)]);
+    const identity = element("td");
+    identity.append(element("div", `${entry.platform || "—"} · ${entry.user_id || "无用户"}`), groupIdentity(entry)); row.append(identity);
+    cells(row, [`${entry.source_plugin || "普通对话"}\n${kinds[entry.kind] || entry.kind || "—"}`]);
     const points = Number(entry.points_delta || 0);
     row.append(element("td", `${points > 0 ? "+" : ""}${decimal(entry.points_delta)}`, `numeric ${points > 0 ? "positive" : points < 0 ? "negative" : ""}`));
     row.append(element("td", money(entry.cost_yuan), "numeric"), element("td", decimal(entry.total_tokens, 0), "numeric"));

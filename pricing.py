@@ -33,6 +33,9 @@ HOLIDAYS_2026 = [
 ]
 MODEL_ALIASES = {
     "deepseek-v4-flash": "deepseek-flash",
+    # Compatibility for the dated name seen in deployments; an exact price card
+    # still takes precedence, including a relay's separately configured rates.
+    "deepseek-v4-flash-0731": "deepseek-flash",
     "deepseek-v4-flash-vision-exp": "deepseek-flash",
 }
 DEFAULTS = {

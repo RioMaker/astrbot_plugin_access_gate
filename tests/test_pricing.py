@@ -62,15 +62,59 @@ def test_request_start_and_timezone_determine_rate_and_snapshot_is_independent()
         price_snapshot({}, "deepseek-flash", start.replace(tzinfo=None))
 
 
-def test_unknown_models_fail_and_only_documented_aliases_get_flash_rates():
-    for alias in ("deepseek-v4-flash", "deepseek-v4-flash-vision-exp"):
+def test_unknown_models_fail_and_only_known_aliases_get_flash_rates():
+    for alias in (
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-0731",
+        "deepseek-v4-flash-vision-exp",
+    ):
         assert (
             price_snapshot({}, alias, stamp("10-29", 9))["priced_model"]
             == "deepseek-flash"
         )
-    for unknown in ("deepseek-v4-pro", "deepseek-chat", "deepseek-flash-fake"):
+    for unknown in (
+        "deepseek-v4-pro",
+        "deepseek-v4-pro-0731",
+        "deepseek-chat",
+        "deepseek-flash-fake",
+        "deepseek-v4-flash-9999",
+        "deepseek-v4-flash-0731-fake",
+    ):
         with pytest.raises(ValueError, match="尚未配置"):
             price_snapshot({}, unknown, stamp("10-29", 9))
+
+
+@pytest.mark.parametrize(
+    ("hour", "tier", "rates"),
+    [
+        (8, "offpeak", {"input": 1, "cached": 0.02, "output": 4}),
+        (9, "peak", {"input": 2, "cached": 0.04, "output": 8}),
+    ],
+)
+def test_flash_0731_alias_preserves_model_and_uses_request_start_rates(
+    hour, tier, rates
+):
+    snapshot = price_snapshot({}, "deepseek-v4-flash-0731", stamp("10-29", hour))
+    assert snapshot["model"] == "deepseek-v4-flash-0731"
+    assert snapshot["priced_model"] == "deepseek-flash"
+    assert snapshot["tier"] == tier
+    assert snapshot["rates"] == rates
+
+
+def test_flash_0731_alias_respects_configured_rates_and_exact_model_override():
+    settings = validate_settings({})
+    settings["model_prices"]["deepseek-flash"]["peak"]["input"] = 3
+    snapshot = price_snapshot(settings, "deepseek-v4-flash-0731", stamp("10-29", 9))
+    assert snapshot["rates"]["input"] == 3
+
+    settings["model_prices"]["deepseek-v4-flash-0731"] = {
+        "offpeak": {"input": 5, "cached": 1, "output": 10},
+        "peak": {"input": 6, "cached": 2, "output": 12},
+    }
+    snapshot = price_snapshot(settings, "deepseek-v4-flash-0731", stamp("10-29", 9))
+    assert snapshot["model"] == snapshot["priced_model"] == "deepseek-v4-flash-0731"
+    assert snapshot["rates"] == {"input": 6, "cached": 2, "output": 12}
+    assert snapshot["price_source"] == "configured"
 
 
 def test_custom_model_and_holiday_are_supported_without_assuming_complete_calendar():

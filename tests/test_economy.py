@@ -157,6 +157,34 @@ def test_default_cost_is_212_points_and_snapshot_survives_settings_change(servic
     assert run(service.balance("qq", "u1")) == 17.88
 
 
+@pytest.mark.parametrize("model_source", ["config", "get_model", "request"])
+def test_flash_0731_provider_is_admitted_and_settled_with_original_model(
+    service, model_source
+):
+    model = "deepseek-v4-flash-0731"
+    provider = SimpleNamespace(provider_config={"id": "flash-0731", "model": model})
+    kwargs = {}
+    if model_source == "get_model":
+        provider.provider_config["model"] = "unpriced-config-model"
+        provider.get_model = lambda: model
+    elif model_source == "request":
+        provider.provider_config["model"] = "unpriced-config-model"
+        kwargs["model"] = model
+    award(service)
+    ticket = run(service.begin(Event(), "", provider, kwargs))
+    assert run(service.settle(ticket, response(), False)) == Decimal("2.12")
+    item = run(service.ledger({"kind": "consumption"}))["items"][0]
+    assert item["status"] == "settled"
+    assert item["cost_yuan"] == 0.106
+    assert item["points_delta"] == -2.12
+    assert item["details"]["model"] == model
+    assert item["details"]["provider_id"] == "flash-0731"
+    assert item["details"]["price"]["model"] == model
+    assert item["details"]["price"]["priced_model"] == "deepseek-flash"
+    assert run(service.balance("qq", "u1")) == 17.88
+    assert run(service.overview())["global"]["reserved_yuan"] == 0
+
+
 def test_independent_plugin_does_not_consume_points_or_budget(service):
     settings(service, global_daily_yuan=0, group_daily_yuan=0)
     ticket = run(service.begin(Event(), "astrbot_plugin_liuyao", PROVIDER, {}))

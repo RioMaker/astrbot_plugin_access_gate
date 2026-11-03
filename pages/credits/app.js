@@ -3,7 +3,7 @@ const bridge = window.AstrBotPluginView ?? window.AstrBotPluginPage;
 const state = { values: null, revision: 0, userPage: 1, ledgerPage: 1, plugins: [], adjustment: null };
 const numericKeys = ["points_per_yuan", "rp_base_points", "rp_step_points", "global_daily_yuan", "group_daily_yuan", "reserve_yuan"];
 const jsonKeys = ["group_overrides", "holidays", "model_prices"];
-const kinds = { rp: "RP 获得", consumption: "LLM 消耗", adjustment: "管理员调整" };
+const kinds = { rp: "RP 获得", poke: "戳一戳奖励", consumption: "LLM 消耗", adjustment: "管理员调整" };
 const statuses = { reserved: "在途预占", unknown: "用量待核对", settled: "已结算", cancelled: "已取消" };
 
 function element(tag, text, className) {

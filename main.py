@@ -5,7 +5,7 @@ import json
 import re
 import unicodedata
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
@@ -19,7 +19,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
-PLUGIN_VERSION = "2.2.3"
+PLUGIN_VERSION = "2.3.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -101,6 +101,7 @@ class AccessGatePlugin(Star):
         self.rp_bridge = None
         self.admin_api = None
         self._credit_denial_notices = OrderedDict()
+        self.poke_cards = None
         logger.info(
             "[access_gate] 已加载；请确保 AstrBot 核心 enable_id_white_list 已关闭"
         )
@@ -178,6 +179,61 @@ class AccessGatePlugin(Star):
         if self._bool("credits_enabled", True) and self.economy:
             return await self.economy.award(event, record, with_receipt=True)
         return None
+
+    async def _handle_poke(self, event):
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if (
+            not isinstance(raw, Mapping)
+            or raw.get("post_type") != "notice"
+            or raw.get("sub_type") != "poke"
+            or not self._bool("poke_reward_enabled", True)
+            or not self._bool("credits_enabled", True)
+        ):
+            return False
+        from .poke import PokeSettings, parse_notice
+
+        notice = parse_notice(event)
+        if notice is None:
+            return False
+        event.should_call_llm(True)
+        event.is_at_or_wake_command = False
+        event.stop_event()
+        if self.economy is None:
+            return True
+        try:
+            settings = PokeSettings.from_config(self.config)
+            receipt = await self.economy.award_poke(event, notice, settings)
+        except Exception:  # noqa: BLE001 - contain failures at the reward event boundary
+            logger.exception("[access_gate] 戳一戳奖励失败")
+            return True
+        if receipt["status"] != "awarded":
+            return True
+        name_getter = getattr(event, "get_sender_name", None)
+        name = (
+            str(name_getter() or event.get_sender_id())
+            if callable(name_getter)
+            else str(event.get_sender_id())
+        )
+        text = settings.text(receipt, name)
+        if settings.reply_mode in ("image", "both"):
+            try:
+                from astrbot.api.message_components import Image
+
+                from .poke_card import PokeCards
+
+                if self.poke_cards is None:
+                    self.poke_cards = PokeCards()
+                data = await asyncio.to_thread(
+                    self.poke_cards.render, receipt["points"]
+                )
+                await event.send(event.chain_result([Image.fromBytes(data)]))
+                if settings.reply_mode == "image":
+                    return True
+            except Exception:  # noqa: BLE001 - adapter/image errors fall back to text
+                logger.exception("[access_gate] 戳一戳奖励图片发送失败，改用文字")
+        # Credit has already committed. A failed reply never grants a second award.
+        await event.send(event.plain_result(text))
+        return True
 
     def credit_status(self):
         return {
@@ -658,6 +714,8 @@ class AccessGatePlugin(Star):
             return
         if not event.is_stopped():
             await self._enforce_group_rest(event)
+        if not event.is_stopped() and await self._handle_poke(event):
+            return
         if not event.is_stopped():
             await self._enforce_empty_at(event)
 
@@ -735,6 +793,8 @@ class AccessGatePlugin(Star):
             return
         await self._enforce_group_rest(event)
         if event.is_stopped():
+            return
+        if await self._handle_poke(event):
             return
         await self._enforce_empty_at(event)
         if event.is_stopped():

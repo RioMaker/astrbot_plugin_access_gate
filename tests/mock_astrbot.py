@@ -14,6 +14,9 @@ class FakeLogger:
     def error(self, *args: object) -> None:
         self.records.append(args)
 
+    def exception(self, *args: object) -> None:
+        self.records.append(args)
+
 
 class AstrBotConfig(dict):
     def __init__(self, *args: object, **kwargs: object) -> None:

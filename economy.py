@@ -127,6 +127,11 @@ class Economy:
             self.store.award, person, day, rp, points, now().isoformat(), with_receipt
         )
 
+    async def award_poke(self, event, notice, settings):
+        return await asyncio.to_thread(
+            self.store.award_poke, identity(event), notice, settings, now()
+        )
+
     @staticmethod
     def provider_info(provider, kwargs):
         config = getattr(provider, "provider_config", {}) or {}

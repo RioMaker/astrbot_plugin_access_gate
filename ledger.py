@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import sys
 import threading
@@ -65,6 +66,12 @@ class Ledger:
             CREATE TABLE IF NOT EXISTS rp_claims (
                 source TEXT NOT NULL, user_id TEXT NOT NULL, day TEXT NOT NULL,
                 PRIMARY KEY(source,user_id,day));
+            CREATE TABLE IF NOT EXISTS poke_events (
+                event_id TEXT PRIMARY KEY, platform TEXT NOT NULL,
+                user_id TEXT NOT NULL, occurred_ts REAL NOT NULL,
+                awarded INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS poke_user_time
+                ON poke_events(platform,user_id,occurred_ts);
             CREATE TABLE IF NOT EXISTS audit (
                 id INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL,
                 actor TEXT NOT NULL, action TEXT NOT NULL, details TEXT NOT NULL);
@@ -198,6 +205,74 @@ class Ledger:
             return (
                 self._rp_receipt(identity, day, awarded=True) if with_receipt else True
             )
+
+    def award_poke(self, identity, notice, settings, now):
+        """Check the rolling quota and award in one cross-connection transaction."""
+        stamp = now.timestamp()
+        platform, user = identity["platform"], identity["user_id"]
+        with self.transaction():
+            if self.db.execute(
+                "SELECT 1 FROM poke_events WHERE event_id=?",
+                (notice["event_id"],),
+            ).fetchone():
+                return {"status": "duplicate"}
+            used = self.db.execute(
+                "SELECT COUNT(*) FROM poke_events WHERE platform=? AND user_id=? "
+                "AND occurred_ts>? AND awarded>=?",
+                (
+                    platform,
+                    user,
+                    stamp - settings.hours * 3600,
+                    1 if settings.count_mode == "success" else 0,
+                ),
+            ).fetchone()[0]
+            if settings.hours > 0 and used >= settings.limit:
+                # Remember denied deliveries without counting them as attempts.
+                self.db.execute(
+                    "INSERT INTO poke_events VALUES(?,?,?,?,?)",
+                    (notice["event_id"], platform, user, stamp, -1),
+                )
+                return {"status": "cooldown"}
+            won = secrets.randbelow(1_000_000) < settings.chance
+            self.db.execute(
+                "INSERT INTO poke_events VALUES(?,?,?,?,?)",
+                (notice["event_id"], platform, user, stamp, int(won)),
+            )
+            if not won:
+                return {"status": "miss"}
+            points = settings.minimum + secrets.randbelow(
+                settings.maximum - settings.minimum + 1
+            )
+            balance = self._user(identity) + units(points, POINTS)
+            self.db.execute(
+                "UPDATE users SET balance=? WHERE platform=? AND user_id=?",
+                (balance, platform, user),
+            )
+            self._insert(
+                "poke:" + notice["event_id"],
+                identity,
+                now.isoformat(),
+                "poke",
+                "settled",
+                "astrbot_plugin_access_gate",
+                {
+                    "points": points,
+                    "bot_id": notice["bot_id"],
+                    "probability_percent": settings.probability,
+                    "reward_min": settings.minimum,
+                    "reward_max": settings.maximum,
+                    "cooldown_hours": settings.hours,
+                    "max_times": settings.limit,
+                    "count_mode": settings.count_mode,
+                },
+                points_delta=units(points, POINTS),
+                balance_after=balance,
+            )
+            return {
+                "status": "awarded",
+                "points": points,
+                "balance": amount(balance, POINTS),
+            }
 
     def _rp_receipt(self, identity, day, *, awarded):
         # Read the reward and current balance under the same write transaction.

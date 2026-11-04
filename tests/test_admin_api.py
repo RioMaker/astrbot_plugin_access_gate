@@ -32,6 +32,7 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
                 name: AsyncMock(return_value={"ok": True})
                 for name in (
                     "overview",
+                    "analytics",
                     "users",
                     "ledger",
                     "settings",
@@ -76,7 +77,7 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
     def test_registers_distinct_get_and_post_routes(self):
         self.api.register()
         signatures = {(path, tuple(methods)) for path, _, methods, _ in self.routes}
-        self.assertEqual(len(signatures), 9)
+        self.assertEqual(len(signatures), 10)
         self.assertIn(
             ("/astrbot_plugin_access_gate/credits/settings", ("GET",)), signatures
         )
@@ -88,6 +89,7 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
         self.request.username = " "
         for method in (
             self.api.overview,
+            self.api.analytics,
             self.api.users,
             self.api.ledger,
             self.api.settings,
@@ -130,6 +132,30 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
         self.request.username = "fixture-api-key:abc"
         self.assertEqual((await self.api.settings())["status"], 403)
         self.economy.settings.assert_not_called()
+        self.assertEqual((await self.api.analytics())["status"], 403)
+        self.economy.analytics.assert_not_called()
+
+    async def test_analytics_passes_range_and_enriches_group_names(self):
+        self.connect_bot([{"group_id": 123, "group_name": "消耗群"}])
+        self.request.query = {"period": "month"}
+        source = {
+            "groups": [{"platform": "qq", "group_id": "123", "cost_yuan": 2}],
+            "users": [],
+            "series": [],
+        }
+        self.economy.analytics.return_value = source
+        result = await self.api.analytics()
+        self.economy.analytics.assert_awaited_once_with("month")
+        self.assertEqual(result["body"]["groups"][0]["group_name"], "消耗群")
+        self.assertNotIn("group_name", source["groups"][0])
+
+    async def test_analytics_rejects_oversized_range_and_surfaces_validation(self):
+        self.request.query = {"period": "x" * 201}
+        self.assertEqual((await self.api.analytics())["status"], 400)
+        self.economy.analytics.assert_not_called()
+        self.request.query = {"period": "invalid"}
+        self.economy.analytics.side_effect = ValueError("统计范围无效")
+        self.assertEqual((await self.api.analytics())["status"], 400)
 
     async def test_overview_adds_integration_without_mutating_service_data(self):
         source = {"day": "2026-10-29"}

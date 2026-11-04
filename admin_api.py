@@ -142,7 +142,15 @@ class AdminAPI:
 
     def register(self) -> None:
         self.active = True
-        for name in ("overview", "users", "ledger", "settings", "quote", "plugins"):
+        for name in (
+            "overview",
+            "analytics",
+            "users",
+            "ledger",
+            "settings",
+            "quote",
+            "plugins",
+        ):
             self.plugin.context.register_web_api(
                 f"/{PLUGIN_NAME}/credits/{name}",
                 getattr(self, name),
@@ -229,6 +237,18 @@ class AdminAPI:
             return await _result(
                 self.plugin.economy.users(self._query("query"), self._page())
             )
+
+        return await self._run(operation)
+
+    async def analytics(self) -> Any:
+        async def operation(_actor: str) -> Any:
+            data = dict(
+                await _result(
+                    self.plugin.economy.analytics(self._query("period", "today"))
+                )
+            )
+            data["groups"] = await self.group_names.enrich(data.get("groups", []))
+            return data
 
         return await self._run(operation)
 

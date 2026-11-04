@@ -8,22 +8,38 @@
 </head>
 <body>
   <header>
-    <div><p class="eyebrow">ACCESS GATE · 管理中心</p><h1>积分与模型额度</h1><p class="muted">RP 获得积分，仅门禁触发的 AI 会话按用量结算。每日额度按北京时间重置。</p></div>
+    <div><p class="eyebrow">ACCESS GATE · 管理中心</p><h1>积分与模型额度</h1><p class="muted">个人积分 / 全局预算双模式，门禁唤醒会话按用量统计。日、月周期均按北京时间。</p></div>
     <button id="refresh" class="secondary" type="button">刷新数据</button>
   </header>
   <div id="message" role="status" aria-live="polite" hidden></div>
-  <nav aria-label="管理分区"><a href="#overview">额度总览</a><a href="#users">用户余额</a><a href="#ledger">历史流水</a><a href="#settings">计费设置</a><a href="#reconcile">用量核对</a></nav>
+  <nav aria-label="管理分区"><a href="#overview">额度总览</a><a href="#analytics">消耗分析</a><a href="#users">用户余额</a><a href="#ledger">历史流水</a><a href="#settings">计费设置</a><a href="#reconcile">用量核对</a></nav>
   <main>
     <section id="overview">
-      <div class="section-heading"><h2>今日额度</h2><span id="day" class="muted">等待连接 AstrBot</span></div>
+      <div class="section-heading"><h2>额度总览</h2><span id="day" class="muted">等待连接 AstrBot</span></div>
+      <p id="mode-status" class="mapping" role="status"></p>
       <div id="summary" class="cards"></div>
       <p class="hint">可用额度 = 每日上限 − 已结算金额 − 在途预占。仅门禁唤醒的会话及提及判断受控；其他插件、WebChat、其他入口及后台调用直接放行，不扣积分、不占额度、不新增流水。升级前的历史记录保留。</p>
       <div class="table-wrap"><table><caption>各群额度</caption><thead><tr><th>群名称 / 群号</th><th>额度来源</th><th>每日上限</th><th>已结算</th><th>预占</th><th>可用</th></tr></thead><tbody id="groups-body"></tbody></table></div>
       <details><summary>关联与拦截状态</summary><pre id="integration">尚未加载</pre></details>
     </section>
+    <section id="analytics">
+      <div class="section-heading"><h2>消耗速度与分布</h2><label>统计范围<select id="analytics-period"><option value="today">今日</option><option value="7d">近 7 天</option><option value="month">本月</option></select></label></div>
+      <p id="analytics-time" class="muted">等待加载账本</p>
+      <div id="analytics-summary" class="cards"></div>
+      <h3>每小时消耗速度 <small>元 / 小时</small></h3>
+      <div id="cost-chart" class="cost-chart"></div>
+      <label class="chart-inspector">查看小时明细<input id="chart-hour" type="range" min="0" max="0" value="0" aria-describedby="chart-detail"></label>
+      <p id="chart-detail" class="hint" aria-live="polite"></p>
+      <div id="peak-analysis" class="mapping"></div>
+      <p class="hint">曲线按请求开始的北京时间归属，以已结算费用 ÷ 该小时已过去的时间计算。当前小时未结束，速率会波动。峰谷依据所选范围内各钟点的平均消耗速度，未经过的时段不参与比较；无记录仅表示本账本未记录消费。未知用量与在途预留单列，不计作零费用。此处的使用高低峰与模型的高峰/空闲价格档位不同。</p>
+      <div class="rankings">
+        <div class="table-wrap"><table><caption>消耗群排行 · 前 20（私聊单列）</caption><thead><tr><th>群名称 / 群号</th><th>已结算</th><th>占比</th><th>请求数</th></tr></thead><tbody id="group-ranking"></tbody></table></div>
+        <div class="table-wrap"><table><caption>消耗用户排行 · 前 20</caption><thead><tr><th>用户</th><th>已结算</th><th>占比</th><th>请求数</th></tr></thead><tbody id="user-ranking"></tbody></table></div>
+      </div>
+    </section>
     <section id="users">
       <div class="section-heading"><h2>用户积分余额</h2><form id="user-search" class="inline"><label class="sr-only" for="user-query">搜索用户</label><input id="user-query" placeholder="搜索用户 ID 或昵称" maxlength="200"><button type="submit">搜索</button></form></div>
-      <div class="table-wrap"><table><thead><tr><th>平台</th><th>用户</th><th>积分</th><th>当前金额等值</th></tr></thead><tbody id="users-body"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>平台</th><th>用户</th><th>积分</th><th>当前金额等值</th><th>累计已结算消费</th></tr></thead><tbody id="users-body"></tbody></table></div>
       <div class="pagination"><button id="users-prev" type="button" class="secondary">上一页</button><span id="users-page"></span><button id="users-next" type="button" class="secondary">下一页</button></div>
       <details><summary>管理员调整积分</summary><form id="adjust-form" class="form-grid">
         <label>平台标识<input name="platform" required maxlength="100" placeholder="QQ 用户填写 qq"></label><label>用户 ID<input name="user_id" required maxlength="100"></label>
@@ -47,14 +63,16 @@
       <div class="section-heading"><h2>积分、额度与费率</h2><span id="revision" class="muted"></span></div>
       <form id="settings-form">
         <div class="form-grid">
+          <label class="wide">积分模式<select name="global_mode"><option value="false">个人积分模式</option><option value="true">全局积分模式</option></select><small>全局模式使用共享日/月预算，停用个人扣分和单群限额，不显示积分消耗，RP 签到不再发分。历史余额保留，戳一戳奖励仍按自身开关执行。需保持插件总积分开关启用。</small></label>
           <label>1 元对应积分<input name="points_per_yuan" type="number" min="0.001" step="0.001" required></label>
           <label>每日 RP 基础积分<input name="rp_base_points" type="number" min="0" step="0.001" required></label>
           <label>每 1 RP 增加积分<input name="rp_step_points" type="number" min="0" step="0.001" required></label>
           <label>全局每日额度（元）<input name="global_daily_yuan" type="number" min="0" step="0.000001" required></label>
+          <label>全局每月额度（元，仅全局模式生效）<input name="global_monthly_yuan" type="number" min="0" step="0.000001" required></label>
           <label>默认单群每日额度（元）<input name="group_daily_yuan" type="number" min="0" step="0.000001" required></label>
           <label>每次请求预占（元）<input name="reserve_yuan" type="number" min="0" step="0.000001" required></label>
         </div>
-        <p class="hint">RP 奖励 = 基础积分 + RP × 每 RP 积分。金额比例只用于新请求结算；已有积分数和历史账单不会重算。</p>
+        <p class="hint">个人模式下 RP 奖励 = 基础积分 + RP × 每 RP 积分。全局模式的日/月任一额度不足即暂停所有群的门禁唤醒 LLM，插件独立调用继续放行。额度 0 表示暂停；每日 00:00、每月 1 日 00:00 自动进入新周期，切换模式不清空当期消费。预占为估算，已发出的请求仍正常结算。</p>
         <div id="mapping" class="mapping"></div>
         <p id="calendar-warning" class="hint" role="status" hidden></p>
         <div class="form-grid json-fields">

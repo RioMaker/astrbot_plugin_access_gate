@@ -18,8 +18,8 @@ from astrbot.core.star.filter.command import GreedyStr
 
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
-PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
-PLUGIN_VERSION = "2.3.1"
+PLUGIN_DESC = "白名单与唤醒、个人/全局积分模式、日月预算与消耗分析"
+PLUGIN_VERSION = "2.4.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -250,7 +250,7 @@ class AccessGatePlugin(Star):
             else {"installed": False},
             "rp": self.rp_bridge.status() if self.rp_bridge else {"connected": False},
             "storage_error": self.economy.fault if self.economy else "尚未初始化",
-            "coverage": "仅门禁插件触发的普通 AI 会话及提及判断受积分、全局和群额度控制；其他插件独立调用、WebChat、其他唤醒入口和后台请求直接放行，不计入本账本。预留是估值，在途实际成本可能越过额度。",
+            "coverage": "仅门禁插件触发的普通 AI 会话及提及判断受控；个人模式检查积分及全局/群日额度，全局模式检查共享日/月额度。其他插件独立调用、WebChat、其他唤醒入口和后台请求直接放行，不计入本账本。预留是估值，在途实际成本可能越过额度。",
         }
 
     def credit_plugins(self):

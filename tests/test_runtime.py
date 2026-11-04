@@ -382,6 +382,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.provider.text_chat()
         self.assertEqual(self.provider.requests, 1)
 
+    async def test_global_monthly_budget_keeps_plugin_commands_and_tools_exempt(self):
+        service = await self._attach_economy(global_mode=True, global_monthly_yuan=0)
+        command = self._loaded_plugin_command()
+        with self.runtime.billing_scope(self.event):
+            async for _ in self.handlers.call_handler(self.event, command):
+                pass
+            context = SimpleNamespace(context=SimpleNamespace(event=self.event))
+            async for _ in self.tool_exec.call_local_llm_tool(
+                context, command, "decorator_handler"
+            ):
+                pass
+            with self.assertRaisesRegex(RuntimeGateDenied, "本月全局"):
+                await self.provider.text_chat()
+        self.assertEqual(self.provider.requests, 2)
+        self.assertEqual((await service.ledger({}))["total"], 0)
+
     async def test_group_override_only_blocks_gate_chat(self):
         await self._attach_economy(group_overrides={"qq:20001": 0})
         with self.runtime.billing_scope(self.event):
@@ -863,6 +879,36 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outputs[3].text().count("[积分-"), 1)
         self.assertEqual(history_part.text, "最后的回答")
         self.assertAlmostEqual(await service.balance("qq", "10001"), 20 - float(total))
+
+    async def test_global_mode_plain_and_stream_replies_have_no_point_notice(self):
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                service, event = await self._notice_setup()
+                payload = await service.settings()
+                payload["values"].update(global_mode=True, group_daily_yuan=0)
+                await service.update_settings(payload, "admin")
+
+                async def process(_, event, streaming=streaming):
+                    if streaming:
+                        async for _ in self.provider.text_chat_stream():
+                            pass
+                    else:
+                        await self.provider.text_chat()
+                    event.result = Result("全局模式回答")
+                    yield
+
+                outputs = [
+                    event.result async for _ in self._notice_stage(process, event)
+                ]
+                await self.runtime._send_missing_notice(
+                    event, self.runtime._installation
+                )
+                self.assertEqual(outputs[0].text(), "全局模式回答")
+                self.assertEqual(await service.balance("qq", "10001"), 20)
+                records = (await service.ledger({"kind": "consumption"}))["items"]
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["points_delta"], 0)
+                self.assertGreater(records[0]["cost_yuan"], 0)
 
     async def test_stream_tail_settles_before_final_response_and_is_not_repeated(self):
         service, event = await self._notice_setup()

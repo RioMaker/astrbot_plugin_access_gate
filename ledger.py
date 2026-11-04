@@ -9,6 +9,7 @@ import sys
 import threading
 import uuid
 from contextlib import contextmanager
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 MONEY = 1_000_000_000
@@ -321,7 +322,15 @@ class Ledger:
                 raise ValueError(
                     "今日全局 LLM 额度不足（含在途预留），请明日再试或联系管理员。"
                 )
-            if identity.get("group_id"):
+            if limits.get("monthly") is not None:
+                spent, held = self._monthly(now[:10])
+                if spent + held >= units(
+                    limits["monthly"], MONEY
+                ) or spent + held + reserve_n > units(limits["monthly"], MONEY):
+                    raise ValueError(
+                        "本月全局 LLM 额度不足（含在途预留），请下月再试或联系管理员。"
+                    )
+            if identity.get("group_id") and limits.get("group") is not None:
                 spent, held = self._daily(
                     now[:10], identity["platform"], identity["group_id"]
                 )
@@ -354,6 +363,17 @@ class Ledger:
                 charged=int(charged),
                 reserved=reserve_n,
             )
+
+    def _monthly(self, day):
+        first = date.fromisoformat(day).replace(day=1)
+        end = (first + timedelta(days=32)).replace(day=1)
+        row = self.db.execute(
+            "SELECT COALESCE(SUM(cost),0),"
+            "COALESCE(SUM(CASE WHEN status IN ('reserved','unknown') THEN reserved ELSE 0 END),0) "
+            "FROM ledger WHERE day>=? AND day<? AND kind='consumption'",
+            (first.isoformat(), end.isoformat()),
+        ).fetchone()
+        return row[0], row[1]
 
     def settle(
         self, request_id, usage, cost, failed, now, actor="", reason="", cancel=False
@@ -502,6 +522,12 @@ class Ledger:
                 item = dict(row)
                 item["balance"] = amount(item["balance"], POINTS)
                 item["amount_yuan"] = item["balance"] / ratio
+                usage = self.db.execute(
+                    "SELECT COALESCE(SUM(cost),0) FROM ledger "
+                    "WHERE platform=? AND user_id=? AND kind='consumption'",
+                    (item["platform"], item["user_id"]),
+                ).fetchone()
+                item["spent_yuan"] = amount(usage[0], MONEY)
                 items.append(item)
             return {"items": items, "page": page, "page_size": 30, "total": total}
 
@@ -572,6 +598,7 @@ class Ledger:
                         group_id=group,
                         is_override=f"{platform}:{group}" in overrides
                         or group in overrides,
+                        enforced=not settings.get("global_mode", False),
                         **budget(used, held, limit),
                     )
                 )
@@ -581,11 +608,26 @@ class Ledger:
             pending = self.db.execute(
                 "SELECT COUNT(*) FROM ledger WHERE status='unknown'"
             ).fetchone()[0]
+            all_spent = self.db.execute(
+                "SELECT COALESCE(SUM(cost),0) FROM ledger WHERE kind='consumption'"
+            ).fetchone()[0]
             return {
                 "day": day,
+                "global_mode": settings.get("global_mode", False),
                 "currency": "CNY",
                 "global_": budget(spent, reserved, settings["global_daily_yuan"]),
+                "monthly": budget(*self._monthly(day), settings["global_monthly_yuan"]),
                 "groups": groups,
-                "totals": {"users": totals[0], "points": amount(totals[1], POINTS)},
+                "totals": {
+                    "users": totals[0],
+                    "points": amount(totals[1], POINTS),
+                    "spent_yuan": amount(all_spent, MONEY),
+                },
                 "pending_count": pending,
             }
+
+    def analytics(self, now, period):
+        from .analytics import consumption_report
+
+        with self.lock:
+            return consumption_report(self.db, now, period)

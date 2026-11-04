@@ -81,6 +81,9 @@ class Economy:
 
     def _settings(self):
         payload = self.store.settings(copy.deepcopy(DEFAULTS))
+        # Fill newly introduced fields without rewriting historical settings or
+        # changing the revision used by open Dashboard pages.
+        payload["values"] = {**copy.deepcopy(DEFAULTS), **payload["values"]}
         # Retain the legacy key for old databases/clients, but it no longer
         # enables billing for independent plugin calls.
         payload["values"]["charged_plugins"] = []
@@ -119,6 +122,8 @@ class Economy:
             return None if with_receipt else False
         person = identity(event)
         settings = (await self.settings())["values"]
+        if settings["global_mode"]:
+            return None if with_receipt else False
         points = (
             Decimal(str(settings["rp_base_points"]))
             + Decimal(str(settings["rp_step_points"])) * rp
@@ -160,7 +165,7 @@ class Economy:
             started = now()
             model, provider_id = self.provider_info(provider, kwargs)
             price = price_snapshot(settings, model, started)
-            charged = True
+            charged = not settings["global_mode"]
             overrides = settings["group_overrides"]
             group_limit = overrides.get(
                 f"{person['platform']}:{person['group_id']}",
@@ -172,7 +177,8 @@ class Economy:
                 "provider_id": provider_id,
                 "model": model,
                 "charged": charged,
-                "estimate_note": "预留为可配置估值，实际用量结算后可能超出本次预留及日额度。",
+                "global_mode": settings["global_mode"],
+                "estimate_note": "预留为可配置估值，实际用量结算后可能超出本次预留及日/月额度。",
             }
             # Reserve admission itself must finish before cancellation can abandon
             # it; an admitted but cancelled request is conservatively unresolved.
@@ -185,7 +191,13 @@ class Economy:
                     "chat",
                     charged,
                     details,
-                    {"global": settings["global_daily_yuan"], "group": group_limit},
+                    {
+                        "global": settings["global_daily_yuan"],
+                        "monthly": settings["global_monthly_yuan"]
+                        if settings["global_mode"]
+                        else None,
+                        "group": group_limit if charged else None,
+                    },
                     settings["reserve_yuan"],
                 )
             )
@@ -242,6 +254,11 @@ class Economy:
         )
         result["global"] = result.pop("global_")
         return result
+
+    async def analytics(self, period="today"):
+        if period not in {"today", "7d", "month"}:
+            raise ValueError("统计范围必须是 today、7d 或 month。")
+        return await asyncio.to_thread(self.store.analytics, now(), period)
 
     @staticmethod
     def page(value):

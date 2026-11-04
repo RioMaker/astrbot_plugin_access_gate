@@ -42,7 +42,9 @@ DEFAULTS = {
     "points_per_yuan": 20,
     "rp_base_points": 19,
     "rp_step_points": 0.02,
+    "global_mode": False,
     "global_daily_yuan": 10,
+    "global_monthly_yuan": 300,
     "group_daily_yuan": 2,
     "reserve_yuan": 0.212,
     "charged_plugins": [],  # Legacy compatibility only; independent plugins pass through.
@@ -96,11 +98,14 @@ def validate_settings(values: dict) -> dict:
         raise ValueError("未知积分配置字段：" + ", ".join(sorted(map(str, unknown))))
     result = copy.deepcopy(DEFAULTS)
     result.update(copy.deepcopy(values))
+    if not isinstance(result["global_mode"], bool):
+        raise ValueError("global_mode 必须是布尔值")
     for name in (
         "points_per_yuan",
         "rp_base_points",
         "rp_step_points",
         "global_daily_yuan",
+        "global_monthly_yuan",
         "group_daily_yuan",
         "reserve_yuan",
     ):

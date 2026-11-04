@@ -19,7 +19,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、RP 积分、LLM 成本及全局/群日额度管理"
-PLUGIN_VERSION = "2.3.0"
+PLUGIN_VERSION = "2.3.1"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -181,6 +181,7 @@ class AccessGatePlugin(Star):
         return None
 
     async def _handle_poke(self, event):
+        """Handle our reward without stopping other plugins' poke listeners."""
         raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
         if (
             not isinstance(raw, Mapping)
@@ -196,8 +197,11 @@ class AccessGatePlugin(Star):
         if notice is None:
             return False
         event.should_call_llm(True)
-        event.is_at_or_wake_command = False
-        event.stop_event()
+        # Both access and wake listeners reach this path. Claim this event
+        # before awaiting, while leaving propagation and the wake flag intact.
+        if event.get_extra("access_gate_poke_processed", False):
+            return True
+        event.set_extra("access_gate_poke_processed", True)
         if self.economy is None:
             return True
         try:
@@ -232,7 +236,10 @@ class AccessGatePlugin(Star):
             except Exception:  # noqa: BLE001 - adapter/image errors fall back to text
                 logger.exception("[access_gate] 戳一戳奖励图片发送失败，改用文字")
         # Credit has already committed. A failed reply never grants a second award.
-        await event.send(event.plain_result(text))
+        try:
+            await event.send(event.plain_result(text))
+        except Exception:  # noqa: BLE001 - preserve other poke handlers on send failures
+            logger.exception("[access_gate] 戳一戳奖励文字发送失败，积分已入账")
         return True
 
     def credit_status(self):

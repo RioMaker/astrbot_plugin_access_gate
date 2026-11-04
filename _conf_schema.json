@@ -1,7 +1,7 @@
 {
   "credits_enabled": {"type": "bool", "description": "启用 RP 积分与门禁会话额度", "default": true, "hint": "奖励、人民币费率、兑换比例、全局/群额度在积分管理页设置。默认全局10元/天、群2元/天、20积分=1元、RP奖励19+0.02×RP。仅本插件称呼/@唤醒的会话及提及判断受控；其他插件独立调用、WebChat、其他入口和后台请求直接放行，不计入账本。关闭后也暂停 RP 和戳一戳奖励。"},
   "credits_insufficient_notice_interval": {"type": "int", "description": "被 @ 时积分不足提醒间隔（秒）", "default": 300, "hint": "同一平台、机器人、群聊及发送者在间隔内最多提醒一次，后续消息仍拦截但保持静默，防止与其他 bot 循环回复。默认 300 秒（5 分钟），范围 0～86400；0 表示每次提醒。重载后重新计时。"},
-  "poke_reward_enabled": {"type": "bool", "description": "启用戳一戳积分奖励", "default": true, "hint": "QQ / OneBot 用户戳本 bot 时抽奖，支持群聊和私聊；遵循白名单和群聊开放时段。中奖直接计入现有积分，不调用 AI。关闭总积分开关时一并暂停。"},
+  "poke_reward_enabled": {"type": "bool", "description": "启用戳一戳积分奖励", "default": true, "hint": "QQ / OneBot 用户戳本 bot 时抽奖，支持群聊和私聊；遵循白名单和群聊开放时段。中奖直接计入现有积分并追加奖励回复，原有戳一戳图片等插件继续处理。不调用默认 AI 聊天。关闭总积分开关时一并暂停。"},
   "poke_reward_probability": {"type": "float", "description": "戳一戳中奖概率（%）", "default": 30.0, "hint": "范围 0～100；30 表示 30%，100 表示必中奖，0 表示不中奖。未中奖默认不回复。"},
   "poke_reward_min": {"type": "int", "description": "戳一戳奖励积分下限", "default": 1, "hint": "1～10000 的整数，不能大于上限；在含上下限的整数区间等概率抽取。"},
   "poke_reward_max": {"type": "int", "description": "戳一戳奖励积分上限", "default": 6, "hint": "1～10000 的整数；与下限相同即固定积分。举牌图片按实际奖励数值生成。"},

@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
@@ -300,8 +301,10 @@ def test_handler_sends_reward_once_and_suppresses_llm(service, entry):
     gate, event = plugin(service, wake_enabled=False), PokeEvent()
     run(getattr(gate, entry)(event))
     assert event.sent == ["嘿嘿，送你一点小幸运～\n积分+3"]
-    assert event.stopped and event.call_llm
+    assert not event.stopped and event.call_llm
+    assert event.is_at_or_wake_command is False
     run(gate.route_wake(event))
+    assert event.sent == ["嘿嘿，送你一点小幸运～\n积分+3"]
     assert run(service.balance("qq", "10001")) == 3
     assert not gate.context.calls
 
@@ -340,7 +343,7 @@ def test_private_poke_is_supported_and_miss_and_cooldown_stay_silent(service):
     gate.config["poke_reward_probability"] = 100
     run(gate.enforce_access(PokeEvent(sequence=1, private=True, group_id="")))
     run(gate.enforce_access(event := PokeEvent(sequence=2)))
-    assert not event.sent and event.stopped
+    assert not event.sent and not event.stopped
     assert run(service.balance("qq", "10001")) == 3
 
 
@@ -368,6 +371,7 @@ def test_image_reply_modes_and_text_fallback_do_not_double_award(
     assert event.sent == (
         [text] if fail else [[b"test-png"]] + ([text] if mode == "both" else [])
     )
+    assert not event.stopped
     assert run(service.balance("qq", "10001")) == 3
 
 
@@ -386,10 +390,81 @@ def test_reply_failure_leaves_committed_credit_and_replay_does_not_award_again(s
         raise OSError("send failed")
 
     event.send = fail_send
-    with pytest.raises(OSError, match="send failed"):
-        run(gate.enforce_access(event))
+    run(gate.enforce_access(event))
+    assert not event.stopped
     assert run(service.balance("qq", "10001")) == 3
     replay = PokeEvent()
     run(gate.enforce_access(replay))
     assert replay.sent == []
     assert run(service.balance("qq", "10001")) == 3
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "awarded",
+        "miss",
+        "cooldown",
+        "duplicate",
+        "not_ready",
+        "invalid_config",
+        "storage_error",
+        "send_error",
+    ],
+)
+def test_reward_allows_original_poke_image_handler_to_run(
+    service, monkeypatch, outcome
+):
+    gate, event = plugin(service), PokeEvent()
+    # Other plugins may inspect the core's wake flag when matching a poke.
+    event.is_at_or_wake_command = True
+    if outcome == "miss":
+        gate.config["poke_reward_probability"] = 0
+    elif outcome in ("cooldown", "duplicate"):
+        award(service, sequence=1 if outcome == "cooldown" else 0)
+    elif outcome == "not_ready":
+        gate.economy = None
+    elif outcome == "invalid_config":
+        gate.config["poke_reward_min"] = 7
+
+    before = run(service.balance("qq", "10001"))
+    spy = AsyncMock(wraps=service.award_poke)
+    if outcome == "storage_error":
+        spy.side_effect = OSError("database unavailable")
+    monkeypatch.setattr(service, "award_poke", spy)
+    original_picture = [b"original-poke-image"]
+    if outcome == "send_error":
+        send = event.send
+
+        async def fail_reward_reply(result):
+            if isinstance(result, str):
+                raise OSError("reward reply failed")
+            await send(result)
+
+        event.send = fail_reward_reply
+
+    async def original_poke_plugin(message):
+        await message.send(original_picture)
+
+    async def dispatch():
+        # Run the two gate listeners, then the original lower-priority plugin.
+        for handler in (gate.enforce_access, gate.route_wake, original_poke_plugin):
+            if event.is_stopped():
+                break
+            await handler(event)
+
+    run(dispatch())
+    assert event.sent[-1:] == [original_picture]
+    assert event.is_at_or_wake_command is True
+    assert not event.stopped and event.call_llm
+    assert not gate.context.calls
+    assert spy.await_count == (0 if outcome in ("not_ready", "invalid_config") else 1)
+    assert run(service.balance("qq", "10001")) == before + (
+        3 if outcome in ("awarded", "send_error") else 0
+    )
+    expected_replies = (
+        ["嘿嘿，送你一点小幸运～\n积分+3", original_picture]
+        if outcome == "awarded"
+        else [original_picture]
+    )
+    assert event.sent == expected_replies

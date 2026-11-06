@@ -5,7 +5,7 @@ scope prevents delayed work from borrowing a completed chat's billing identity.
 """
 
 # Runtime integrations may raise arbitrary plugin exceptions. Catch at the
-# boundary, report the exception type, and preserve interruption semantics.
+# boundary, report diagnostics, and preserve interruption semantics.
 # ruff: noqa: BLE001
 
 from __future__ import annotations
@@ -83,6 +83,13 @@ def _field(value: Any, key: str, default: Any = None) -> Any:
         if isinstance(value, dict)
         else getattr(value, key, default)
     )
+
+
+def _import_runtime_module(name: str):
+    try:
+        return importlib.import_module(name)
+    except ImportError as exc:
+        raise ImportError(f"导入 {name} 失败：{exc}") from exc
 
 
 class BillingRuntime:
@@ -167,21 +174,25 @@ class BillingRuntime:
         if self.active:
             return self.status()["complete"]
         try:
-            scheduler = importlib.import_module("astrbot.core.pipeline.scheduler")
-            handlers = importlib.import_module(
+            scheduler = _import_runtime_module("astrbot.core.pipeline.scheduler")
+            # Follow AstrBot's bootstrap order. On lazy-loading hosts (4.29.4),
+            # agent_request imports Stage back from process_stage.stage; importing
+            # the child first creates a cycle before AgentRequestSubStage exists.
+            process_stage = _import_runtime_module(
+                "astrbot.core.pipeline.process_stage.stage"
+            )
+            handlers = _import_runtime_module(
                 "astrbot.core.pipeline.process_stage.method.star_request"
             )
-            tool_exec = importlib.import_module("astrbot.core.astr_agent_tool_exec")
-            registry = importlib.import_module(
+            tool_exec = _import_runtime_module("astrbot.core.astr_agent_tool_exec")
+            registry = _import_runtime_module(
                 "astrbot.core.star.star_handler"
             ).star_handlers_registry
-            request_stage = importlib.import_module(
-                "astrbot.core.pipeline.process_stage.method.agent_request"
-            ).AgentRequestSubStage
-            request_type = importlib.import_module(
+            request_stage = process_stage.AgentRequestSubStage
+            request_type = _import_runtime_module(
                 "astrbot.core.provider.entities"
             ).ProviderRequest
-            respond_stage = importlib.import_module(
+            respond_stage = _import_runtime_module(
                 "astrbot.core.pipeline.respond.stage"
             ).RespondStage
             if not inspect.iscoroutinefunction(scheduler.PipelineScheduler.execute):
@@ -253,8 +264,15 @@ class BillingRuntime:
             self._refresh(providers, installation)
             return self.status()["complete"]
         except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "[access_gate] LLM 额度网关安装失败。"
+            )
             self.uninstall()
-            self._warn(f"LLM 额度网关安装失败（{type(exc).__name__}）；接口不兼容。")
+            detail = " ".join(str(exc).split())[:600] or "未提供异常详情"
+            self._warn(
+                f"LLM 额度网关安装失败（{type(exc).__name__}）：{detail}；"
+                "请检查 AstrBot 日志。"
+            )
             self._install_degraded_guard()
             return False
 

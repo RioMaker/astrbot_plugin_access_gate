@@ -1,6 +1,7 @@
 """Billing invariants against AstrBot-shaped interfaces, without model access."""
 
 import asyncio
+import importlib
 import inspect
 import sys
 import tempfile
@@ -184,6 +185,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         registry_module.star_handlers_registry = self.hooks
         request_stage_module = ModuleType("agent_request")
         request_stage_module.AgentRequestSubStage = AgentRequestStage
+        process_stage_module = ModuleType("process_stage")
+        process_stage_module.AgentRequestSubStage = AgentRequestStage
         request_entities = ModuleType("entities")
         request_entities.ProviderRequest = ProviderRequest
         self.agent_stage = AgentRequestStage()
@@ -192,6 +195,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.respond_stage = RespondStage()
         modules = {
             "astrbot.core.pipeline.scheduler": scheduler_module,
+            "astrbot.core.pipeline.process_stage.stage": process_stage_module,
             "astrbot.core.pipeline.process_stage.method.star_request": self.handlers,
             "astrbot.core.astr_agent_tool_exec": self.tool_exec,
             "astrbot.core.star.star_handler": registry_module,
@@ -683,7 +687,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_installation_failure_does_not_block_other_consumers_or_loading(self):
         self.runtime.uninstall()
         self.handlers.call_handler = lambda *args, **kwargs: None
-        self.assertFalse(self.runtime.install())
+        with self.assertLogs("astrbot_plugin_access_gate.runtime", level="ERROR"):
+            self.assertFalse(self.runtime.install())
         self.assertTrue(self.runtime.status()["installed"])
         self.assertFalse(self.runtime.status()["complete"])
         self.runtime.mark_chat(self.event)
@@ -698,6 +703,88 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.provider.requests, 1)
         self.assertEqual(len(self.providers), 2)
         self.assertEqual(self.finished, [])
+
+    async def test_cold_pipeline_import_avoids_agent_stage_cycle(self):
+        # AstrBot v4.29.4 imports Stage from process_stage.stage in agent_request,
+        # while process_stage.stage imports AgentRequestSubStage in return.
+        # Real imports must enter through the outer stage, as core bootstrap does.
+        self.runtime.uninstall()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules):
+            root = Path(directory)
+            method = root / "method"
+            method.mkdir()
+            (root / "stage.py").write_text(
+                "from ..stage import Stage\n"
+                "from .method.agent_request import AgentRequestSubStage\n",
+                encoding="utf-8",
+            )
+            (method / "agent_request.py").write_text(
+                "from ..stage import Stage\n"
+                "class AgentRequestSubStage(Stage):\n"
+                "    async def process(self, event):\n"
+                "        await event.provider.text_chat()\n"
+                "        yield None\n",
+                encoding="utf-8",
+            )
+            for name, path in (
+                ("astrbot.core.pipeline.process_stage", root),
+                ("astrbot.core.pipeline.process_stage.method", method),
+            ):
+                package = ModuleType(name)
+                package.__path__ = [str(path)]
+                sys.modules[name] = package
+            base_stage = ModuleType("astrbot.core.pipeline.stage")
+            base_stage.Stage = type("Stage", (), {})
+            sys.modules[base_stage.__name__] = base_stage
+            for name in (
+                "astrbot.core.pipeline.process_stage.stage",
+                "astrbot.core.pipeline.process_stage.method.agent_request",
+            ):
+                sys.modules.pop(name, None)
+
+            try:
+                self.assertTrue(self.runtime.install(), self.runtime.status())
+                self.runtime.mark_chat(self.event)
+                self.event.provider = self.provider
+                stage = importlib.import_module(
+                    "astrbot.core.pipeline.process_stage.stage"
+                ).AgentRequestSubStage()
+                with self.runtime.billing_scope(self.event):
+                    async for _ in stage.process(self.event):
+                        pass
+                self.assertEqual(len(self.started), 1)
+                self.assertEqual(len(self.finished), 1)
+                self.assertTrue(self.runtime.status()["complete"])
+            finally:
+                self.runtime.uninstall()
+
+    async def test_import_failure_reports_module_and_original_error(self):
+        self.runtime.uninstall()
+        module = "astrbot.core.pipeline.process_stage.stage"
+        detail = "cannot import name 'AgentRequestSubStage' from partially initialized module"
+        original_import = importlib.import_module
+
+        def import_module(name):
+            if name == module:
+                raise ImportError(detail)
+            return original_import(name)
+
+        with (
+            patch("importlib.import_module", side_effect=import_module),
+            self.assertLogs(
+                "astrbot_plugin_access_gate.runtime", level="ERROR"
+            ) as logs,
+        ):
+            self.assertFalse(self.runtime.install())
+        status = self.runtime.status()
+        self.assertTrue(status["installed"])
+        self.assertFalse(status["complete"])
+        self.assertFalse(status["scope_tracking"])
+        self.assertTrue(status["hotload_tracking"])
+        self.assertIn(module, status["errors"][0])
+        self.assertIn(detail, status["errors"][0])
+        self.assertIn("Traceback", "\n".join(logs.output))
+        self.assertIn(detail, "\n".join(logs.output))
 
     async def test_reinstall_does_not_reactivate_old_wrapper(self):
         old_wrapper = self.provider.text_chat

@@ -1,5 +1,13 @@
 # AstrBot 独立白名单门禁
 
+## AstrBot 4.29.4 启动接入兼容（2.4.1）
+
+修复 AstrBot 4.29.4 启动时积分网关报 `ImportError`、门禁唤醒会话被暂停的问题。该版本的消息流水线采用延迟加载，直接导入 Agent 子阶段会与主处理阶段形成循环导入；网关现在遵循核心的加载顺序，先加载主处理阶段，再取得 Agent 子阶段。导入关系已核对官方 [4.29.4 主处理阶段](https://github.com/AstrBotDevs/AstrBot/blob/v4.29.4/astrbot/core/pipeline/process_stage/stage.py) 和 [Agent 子阶段](https://github.com/AstrBotDevs/AstrBot/blob/v4.29.4/astrbot/core/pipeline/process_stage/method/agent_request.py)。
+
+接入失败时，管理页「关联与拦截状态」中的 `runtime.errors` 现在显示失败模块和具体导入错误，日志保留异常堆栈，便于区分接口变化与依赖异常。完整接入失败时仍暂停门禁会话，其他插件独立调用继续放行。
+
+更新到 2.4.1 后重载门禁插件；若为上述导入顺序问题，`runtime.complete` 和各项跟踪状态应恢复为 `true`，`runtime.errors` 为空。已有积分、额度和消费记录保留。已增加真实 Python 模块循环导入回归和错误诊断测试；真实 AstrBot / QQ 环境仍需部署后验证。
+
 ## 全局积分模式与消耗分析（2.4.0）
 
 在 **AstrBot → 插件 → 门禁 →「积分与模型额度」→ 计费设置** 将“积分模式”切换为 **全局积分模式**，设置全局每日、每月额度后保存，后续请求立即使用新规则。需保持插件配置中的总积分开关 `credits_enabled` 启用。新模式默认关闭，已有个人积分配置不变；日额度沿用已有值（新安装默认 **10 元**），月额度默认 **300 元**，两者均可修改，**0 表示暂停服务**。

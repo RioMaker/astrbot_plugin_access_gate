@@ -19,7 +19,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、个人/全局积分模式、日月预算与消耗分析"
-PLUGIN_VERSION = "2.4.0"
+PLUGIN_VERSION = "2.4.2"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -392,6 +392,35 @@ class AccessGatePlugin(Star):
                 return True
         return False
 
+    async def _handle_custom_help(self, event):
+        """Offer allowed shortcuts to custom_help before ordinary wake handling."""
+        getter = getattr(self.context, "get_all_stars", None)
+        if not callable(getter):
+            return False
+        try:
+            for star in getter():
+                if getattr(
+                    star, "name", ""
+                ) != "astrbot_plugin_custom_help" or not getattr(
+                    star, "activated", True
+                ):
+                    continue
+                active = event.get_extra("activated_handlers", None)
+                if active is not None and not any(
+                    getattr(item, "handler_module_path", None)
+                    == getattr(star, "module_path", "")
+                    for item in active
+                ):
+                    continue
+                handler = getattr(
+                    getattr(star, "star_cls", None), "handle_help_shortcut", None
+                )
+                if callable(handler):
+                    return bool(await handler(event))
+        except Exception:  # noqa: BLE001 - optional help must not break access controls
+            logger.exception("[access_gate] 自定义帮助快捷入口处理失败")
+        return False
+
     async def _enforce_empty_at(self, event: AstrMessageEvent) -> None:
         # A bare @ must not fall back to the native Agent, even when plugin
         # wake routing is disabled. Rest handling has already taken precedence.
@@ -721,9 +750,12 @@ class AccessGatePlugin(Star):
             return
         if not event.is_stopped():
             await self._enforce_group_rest(event)
-        if not event.is_stopped() and await self._handle_poke(event):
+        if event.is_stopped():
             return
-        if not event.is_stopped():
+        poke_handled = await self._handle_poke(event)
+        if not event.is_stopped() and await self._handle_custom_help(event):
+            return
+        if not event.is_stopped() and not poke_handled:
             await self._enforce_empty_at(event)
 
     @staticmethod
@@ -801,7 +833,10 @@ class AccessGatePlugin(Star):
         await self._enforce_group_rest(event)
         if event.is_stopped():
             return
-        if await self._handle_poke(event):
+        poke_handled = await self._handle_poke(event)
+        if not event.is_stopped() and await self._handle_custom_help(event):
+            return
+        if event.is_stopped() or poke_handled:
             return
         await self._enforce_empty_at(event)
         if event.is_stopped():

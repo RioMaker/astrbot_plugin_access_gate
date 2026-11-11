@@ -1,5 +1,9 @@
 # AstrBot 独立白名单门禁
 
+## 自定义帮助快捷入口（2.4.2）
+
+通过白名单和群休息检查后，可交给自定义帮助插件 v2.3.0 的快捷入口处理空 @、独立点名和戳机器人。群开关、名称与帮助模板均在自定义帮助工作台配置；未启用或未安装时沿用原有唤醒。戳一戳积分仍先按原规则处理，帮助发送不会重复发放积分；普通聊天、指令和权限边界保持原流程。
+
 ## AstrBot 4.29.4 启动接入兼容（2.4.1）
 
 修复 AstrBot 4.29.4 启动时积分网关报 `ImportError`、门禁唤醒会话被暂停的问题。该版本的消息流水线采用延迟加载，直接导入 Agent 子阶段会与主处理阶段形成循环导入；网关现在遵循核心的加载顺序，先加载主处理阶段，再取得 Agent 子阶段。导入关系已核对官方 [4.29.4 主处理阶段](https://github.com/AstrBotDevs/AstrBot/blob/v4.29.4/astrbot/core/pipeline/process_stage/stage.py) 和 [Agent 子阶段](https://github.com/AstrBotDevs/AstrBot/blob/v4.29.4/astrbot/core/pipeline/process_stage/method/agent_request.py)。

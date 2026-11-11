@@ -19,7 +19,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、个人/全局积分模式、日月预算与消耗分析"
-PLUGIN_VERSION = "2.4.2"
+PLUGIN_VERSION = "2.4.3"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -102,6 +102,7 @@ class AccessGatePlugin(Star):
         self.admin_api = None
         self._credit_denial_notices = OrderedDict()
         self.poke_cards = None
+        self._custom_help_bridge_issue = None
         logger.info(
             "[access_gate] 已加载；请确保 AstrBot 核心 enable_id_white_list 已关闭"
         )
@@ -180,7 +181,7 @@ class AccessGatePlugin(Star):
             return await self.economy.award(event, record, with_receipt=True)
         return None
 
-    async def _handle_poke(self, event):
+    async def _handle_poke(self, event, *, reply=True):
         """Handle our reward without stopping other plugins' poke listeners."""
         raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
         if (
@@ -210,7 +211,7 @@ class AccessGatePlugin(Star):
         except Exception:  # noqa: BLE001 - contain failures at the reward event boundary
             logger.exception("[access_gate] 戳一戳奖励失败")
             return True
-        if receipt["status"] != "awarded":
+        if receipt["status"] != "awarded" or not reply:
             return True
         name_getter = getattr(event, "get_sender_name", None)
         name = (
@@ -392,6 +393,11 @@ class AccessGatePlugin(Star):
                 return True
         return False
 
+    def _report_help_bridge_issue(self, reason):
+        if self._custom_help_bridge_issue != reason:
+            logger.warning("[access_gate] %s", reason)
+            self._custom_help_bridge_issue = reason
+
     async def _handle_custom_help(self, event):
         """Offer allowed shortcuts to custom_help before ordinary wake handling."""
         getter = getattr(self.context, "get_all_stars", None)
@@ -412,11 +418,23 @@ class AccessGatePlugin(Star):
                     for item in active
                 ):
                     continue
-                handler = getattr(
-                    getattr(star, "star_cls", None), "handle_help_shortcut", None
-                )
-                if callable(handler):
-                    return bool(await handler(event))
+                instance = getattr(star, "star_cls", None)
+                handler = getattr(instance, "handle_help_shortcut", None)
+                if not callable(handler):
+                    self._report_help_bridge_issue(
+                        "自定义帮助运行实例缺少快捷帮助接口（登记版本："
+                        f"{getattr(star, 'version', '未知')}）。"
+                        "请更新并重载自定义帮助与门禁插件，仍未生效时重启 AstrBot。"
+                    )
+                    continue
+                if getattr(instance, "closed", False):
+                    self._report_help_bridge_issue(
+                        "自定义帮助运行实例已终止；请重载自定义帮助与门禁插件，"
+                        "仍未生效时重启 AstrBot。"
+                    )
+                    continue
+                self._custom_help_bridge_issue = None
+                return bool(await handler(event))
         except Exception:  # noqa: BLE001 - optional help must not break access controls
             logger.exception("[access_gate] 自定义帮助快捷入口处理失败")
         return False
@@ -752,9 +770,13 @@ class AccessGatePlugin(Star):
             await self._enforce_group_rest(event)
         if event.is_stopped():
             return
-        poke_handled = await self._handle_poke(event)
-        if not event.is_stopped() and await self._handle_custom_help(event):
+        help_handled = await self._handle_custom_help(event)
+        if help_handled or event.is_stopped():
+            # Help owns the reply, even if delivery fails after claiming it.
+            # Preserve the reward ledger without a second card/text reply.
+            await self._handle_poke(event, reply=False)
             return
+        poke_handled = await self._handle_poke(event)
         if not event.is_stopped() and not poke_handled:
             await self._enforce_empty_at(event)
 
@@ -833,9 +855,13 @@ class AccessGatePlugin(Star):
         await self._enforce_group_rest(event)
         if event.is_stopped():
             return
-        poke_handled = await self._handle_poke(event)
-        if not event.is_stopped() and await self._handle_custom_help(event):
+        help_handled = await self._handle_custom_help(event)
+        if help_handled or event.is_stopped():
+            # Help owns the reply, even if delivery fails after claiming it.
+            # Preserve the reward ledger without a second card/text reply.
+            await self._handle_poke(event, reply=False)
             return
+        poke_handled = await self._handle_poke(event)
         if event.is_stopped() or poke_handled:
             return
         await self._enforce_empty_at(event)

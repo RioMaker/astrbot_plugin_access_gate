@@ -1,7 +1,7 @@
 # AstrBot 独立白名单门禁
 
 <p align="center">
-  <img src="logo.png" alt="门禁与积分额度管理 Logo：蓝色盾形门框与金色积分币" width="160" />
+  <img src="logo.png" alt="门禁与积分额度管理 Logo：蓝色实心盾牌与金色积分币" width="160" />
 </p>
 
 [Logo 设计说明与生成提示词](assets/logo/README.md)

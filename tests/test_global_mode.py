@@ -245,3 +245,73 @@ def test_empty_analytics_and_period_validation(service, monkeypatch):
     assert report["series"][0]["rate_yuan_per_hour"] == 0
     with pytest.raises(ValueError):
         run(service.analytics("all' OR 1=1"))
+
+
+def test_ranking_links_match_accounts_private_chats_and_beijing_time(
+    service, monkeypatch
+):
+    settings(service, global_mode=True)
+
+    def consume(stamp, event, usage):
+        monkeypatch.setattr(economy, "now", lambda: datetime.fromisoformat(stamp))
+        ticket = run(service.begin(event, "", PROVIDER, {}))
+        run(service.settle(ticket, usage, False))
+
+    consume("2026-10-23T00:00:00+08:00", Event("shared", "g"), response())
+    consume("2026-10-28T00:00:00+08:00", Event("shared", ""), response())
+    consume("2026-10-29T09:00:00+08:00", Event("shared", "g", "other"), response())
+    consume("2026-10-29T10:00:00+08:00", Event("shared", "g"), response())
+    consume("2026-10-29T10:00:00.000001+08:00", Event("unknown", ""), None)
+    monkeypatch.setattr(
+        economy,
+        "now",
+        lambda: datetime.fromisoformat("2026-10-29T10:00:00.000001+08:00"),
+    )
+    for period in ("today", "7d", "month"):
+        report = run(service.analytics(period))
+        filters = {
+            "kind": "consumption",
+            "status": "settled",
+            "since": report["start"],
+            "until": report["until"],
+        }
+        for ranking in ("groups", "users"):
+            for entry in report[ranking]:
+                subject = {"platform": entry["platform"]}
+                if ranking == "users":
+                    subject["user_id"] = entry["user_id"]
+                elif entry["group_id"]:
+                    subject["group_id"] = entry["group_id"]
+                else:
+                    subject["scope"] = "private"
+                rows = run(service.ledger({**filters, **subject}))
+                assert rows["total"] == entry["requests"]
+                assert sum(
+                    item["cost_yuan"] for item in rows["items"]
+                ) == pytest.approx(entry["cost_yuan"])
+        recent = run(service.ledger({**filters, "since": report["recent_since"]}))
+        assert recent["total"] == 1
+        assert recent["items"][0]["cost_yuan"] == report["recent_hour_yuan"]
+        pending = run(service.ledger({**filters, "status": "pending"}))
+        assert pending["total"] == report["pending_count"] == 1
+    account = run(service.users(platform="qq", user_id="shared"))
+    assert account["total"] == 1
+    assert account["items"][0]["platform"] == "qq"
+    before = run(
+        service.ledger(
+            {
+                "kind": "consumption",
+                "day": "2026-10-29",
+                "until": "2026-10-29T02:00:00+00:00",
+            }
+        )
+    )
+    assert before["total"] == 1
+    for invalid in (
+        {"scope": "private", "group_id": "g"},
+        {"scope": "other"},
+        {"since": "2026-10-29"},
+        {"since": report["until"], "until": report["start"]},
+    ):
+        with pytest.raises(ValueError):
+            run(service.ledger(invalid))

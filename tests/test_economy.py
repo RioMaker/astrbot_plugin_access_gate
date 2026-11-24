@@ -52,6 +52,52 @@ PROVIDER = SimpleNamespace(provider_config={"id": "test", "model": "deepseek-fla
 WHEN = datetime(2026, 10, 29, 20, tzinfo=economy.BEIJING)
 
 
+@pytest.mark.parametrize("custom", [False, True])
+def test_v1_price_upgrade_only_extends_untouched_table_once(
+    tmp_path, monkeypatch, custom
+):
+    monkeypatch.setattr(economy, "now", lambda: WHEN)
+    path = tmp_path / "old.db"
+    old = economy.Economy(path)
+    award(old)
+    ticket = run(old.begin(Event(), "", PROVIDER, {}))
+    run(old.settle(ticket, response(), False))
+    snapshot = old.store.get_request(ticket["request_id"])
+    values = run(old.settings())["values"]
+    del values["model_prices"]["deepseek-v4-pro"]
+    if custom:
+        values["model_prices"]["deepseek-flash"]["peak"]["output"] = 12
+    old.store.save_settings(0, values, "old-client", WHEN.isoformat())
+    with old.store.transaction():
+        old.store.db.execute(
+            "DELETE FROM audit WHERE action='upgrade_flash_only_catalog_2_5'"
+        )
+    old.store.close()
+
+    upgraded = economy.Economy(path)
+    try:
+        saved = run(upgraded.settings())
+        assert saved["revision"] == (1 if custom else 2)
+        assert ("deepseek-v4-pro" in saved["values"]["model_prices"]) is (not custom)
+        assert (
+            saved["values"]["model_prices"]["deepseek-flash"]
+            == values["model_prices"]["deepseek-flash"]
+        )
+        assert upgraded.store.get_request(ticket["request_id"]) == snapshot
+        if not custom:
+            del saved["values"]["model_prices"]["deepseek-v4-pro"]
+            run(upgraded.update_settings(saved, "admin"))
+    finally:
+        upgraded.store.close()
+    reopened = economy.Economy(path)
+    try:
+        assert (
+            run(reopened.settings())["values"]["model_prices"] == values["model_prices"]
+        )
+    finally:
+        reopened.store.close()
+
+
 @pytest.fixture
 def service(tmp_path, monkeypatch):
     monkeypatch.setattr(economy, "now", lambda: WHEN)

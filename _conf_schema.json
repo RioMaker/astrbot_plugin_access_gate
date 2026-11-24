@@ -1,143 +1,453 @@
 {
-  "credits_enabled": {"type": "bool", "description": "启用积分与门禁会话额度", "default": true, "hint": "在「积分与模型额度」管理页切换个人/全局模式，并设置日/月预算和查看消耗曲线排行。全局模式默认关闭；开启后共享全局10元/天、300元/月（均可修改），不扣个人积分、不执行单群限额、RP签到不发分。个人模式默认群2元/天、20积分=1元、RP奖励19+0.02×RP。仅本插件称呼/@唤醒的会话及提及判断受控；其他插件独立调用、WebChat、其他入口和后台请求直接放行，不计入账本。关闭总开关后暂停额度控制、RP和戳一戳奖励。"},
-  "credits_insufficient_notice_interval": {"type": "int", "description": "被 @ 时积分不足提醒间隔（秒）", "default": 300, "hint": "同一平台、机器人、群聊及发送者在间隔内最多提醒一次，后续消息仍拦截但保持静默，防止与其他 bot 循环回复。默认 300 秒（5 分钟），范围 0～86400；0 表示每次提醒。重载后重新计时。"},
-  "poke_reward_enabled": {"type": "bool", "description": "启用戳一戳积分奖励", "default": true, "hint": "QQ / OneBot 用户戳本 bot 时抽奖，支持群聊和私聊；遵循白名单和群聊开放时段。中奖直接计入现有积分并追加奖励回复，原有戳一戳图片等插件继续处理。不调用默认 AI 聊天。关闭总积分开关时一并暂停。"},
-  "poke_reward_probability": {"type": "float", "description": "戳一戳中奖概率（%）", "default": 30.0, "hint": "范围 0～100；30 表示 30%，100 表示必中奖，0 表示不中奖。未中奖默认不回复。"},
-  "poke_reward_min": {"type": "int", "description": "戳一戳奖励积分下限", "default": 1, "hint": "1～10000 的整数，不能大于上限；在含上下限的整数区间等概率抽取。"},
-  "poke_reward_max": {"type": "int", "description": "戳一戳奖励积分上限", "default": 6, "hint": "1～10000 的整数；与下限相同即固定积分。举牌图片按实际奖励数值生成。"},
-  "poke_reward_cooldown_hours": {"type": "float", "description": "戳一戳限次周期（小时）", "default": 8.0, "hint": "0～8760，可填小数；默认滚动 8 小时。0 表示不限次数，但重复上报的同一通知仍不重复抽奖。冷却记录保存到数据库，重载或重启后保留。"},
-  "poke_reward_max_times": {"type": "int", "description": "每个周期可触发次数", "default": 1, "hint": "1～1000。按同一个 QQ 用户共享计次，跨群、私聊及同库的多个 bot 不另开次数。默认过去 8 小时最多中奖 1 次，满额时静默。"},
-  "poke_reward_count_mode": {"type": "string", "description": "戳一戳限次方式", "default": "success", "options": ["success", "attempt"], "hint": "success：仅中奖消耗次数，没中奖可继续尝试；attempt：每次有效尝试都消耗次数。次数用完后的戳一戳不会延长冷却。"},
-  "poke_reward_reply_mode": {"type": "string", "description": "戳一戳中奖回复方式", "default": "image", "options": ["text", "image", "both"], "hint": "text：仅自定义文字；image：随机表情的可可子举牌图片；both：图片和文字。图片失败时自动改发文字，积分只发一次。"},
-  "poke_reward_reply": {"type": "text", "description": "戳一戳中奖回复文字", "default": "嘿嘿，送你一点小幸运～\n积分+{points}", "hint": "支持 {points} 本次积分、{balance} 入账后余额、{nickname} 用户昵称，最多 1000 字。没有 {points} 时自动追加“积分+实际数值”。仅图片模式下作为图片失败时的备用回复。"},
-  "wake_enabled": {"type": "bool", "description": "启用插件唤醒", "default": true, "hint": "系统唤醒词仅保留 /，LLM 额外唤醒前缀清空；开启私聊需要唤醒前缀。"},
-  "wake_names": {"type": "list", "description": "机器人称呼", "default": ["可可子"], "items": {"type": "string"}, "hint": "开头呼叫直接回复；正文提及先判断是否回复。只检查本次正文。"},
-  "mention_judge_enabled": {"type": "bool", "description": "正文提及时由 LLM 判断是否回复", "default": true, "hint": "使用当前会话模型，无工具、无历史写入；超时20秒或解析失败保持沉默。沉默也消耗一次判断请求。"},
-  "wake_on_at": {"type": "bool", "description": "允许单独 @ 机器人唤醒", "default": true},
-  "group_rest_enabled": {
-    "type": "bool",
-    "description": "启用群聊开放时段限制",
-    "default": true,
-    "hint": "仅对下方填写的群聊生效。当前北京时间的星期和时间必须同时命中一条开放规则，才能聊天与唤醒；其他时间休息。指令仍不受时段限制，但须通过白名单。升级后原有起止时间按开放时段解释。"
-  },
-  "group_rest_rules": {
-    "type": "template_list",
-    "description": "群聊开放规则",
-    "hint": "每条规则独立设置群号、开放星期、开放时间和休息提示。群号留空不生效；默认每天开放 08:00–16:00。同一群命中任意一条完整规则即可使用；全部未命中时休息，并采用该群第一条有效规则的提示。",
-    "default": [
-      {
-        "__template_key": "group_rest",
-        "group_id": "",
-        "weekdays": ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"],
-        "start": "08:00",
-        "end": "16:00",
-        "reply": "休息ing，工作时间：{work_start}-{work_end}"
-      }
-    ],
-    "templates": {
-      "group_rest": {
-        "name": "群聊开放时段",
-        "display_item": "group_id",
+  "access": {
+    "type": "object",
+    "description": "访问与白名单",
+    "hint": "群聊、私聊、管理员豁免和拦截日志。",
+    "collapsed": false,
+    "items": {
+      "group_whitelist_enabled": {
+        "type": "bool",
+        "description": "启用群聊白名单",
+        "hint": "开启后，只允许“群聊白名单”中的群聊消息继续进入其他插件和 LLM。名单为空时拒绝全部群聊，但管理员绕过仍可生效。",
+        "default": true
+      },
+      "group_whitelist": {
+        "type": "list",
+        "description": "群聊白名单",
+        "hint": "每行填写一个群号；也支持填写完整 unified_msg_origin。只需命中其中一种标识即可放行。",
+        "default": [],
         "items": {
-          "group_id": {
-            "type": "string",
-            "description": "群聊号",
-            "default": "",
-            "hint": "填写一个群号，也支持完整 unified_msg_origin。开放规则不会自动加入白名单，群聊须先通过现有门禁。"
-          },
-          "weekdays": {
-            "type": "list",
-            "description": "开放星期",
-            "default": ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"],
-            "options": ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"],
-            "items": {"type": "string"},
-            "hint": "任意选择 1～7 个星期，默认全选；必须同时满足当前星期和时间才开放。本条规则在未选中的星期不提供开放窗口。跨午夜也按当前星期判断：仅选星期五、22:00–06:00，开放周五 00:00–06:00 和 22:00–24:00，周六凌晨不开放。空列表或非法值使本条规则无效并记录错误。"
-          },
-          "start": {
-            "type": "string",
-            "description": "开放开始时间",
-            "default": "08:00",
-            "hint": "北京时间 HH:MM，范围 00:00–23:59；所选星期从这一分钟起允许聊天与唤醒。"
-          },
-          "end": {
-            "type": "string",
-            "description": "开放结束时间",
-            "default": "16:00",
-            "hint": "北京时间 HH:MM；到这一分钟停止开放。早于开始时间表示每天的凌晨段和晚间段；两段均须满足当天为选中的星期。开始和结束不能相同。"
-          },
-          "reply": {
-            "type": "text",
-            "description": "休息时被 @ 的回复内容",
-            "default": "休息ing，工作时间：{work_start}-{work_end}",
-            "hint": "可填写固定文字，或使用 {work_days}、{work_start}、{work_end} 显示本条规则的开放星期、开始和结束时间。默认显示：休息ing，工作时间：08:00-16:00。兼容旧占位符 {rest_start}=开放结束时间、{rest_end}=开放开始时间；这些时间均为配置时钟值，不表示下次开放日期。多条规则时建议自行填写完整安排。"
+          "type": "string"
+        }
+      },
+      "group_admin_bypass": {
+        "type": "bool",
+        "description": "管理员绕过群聊白名单",
+        "hint": "AstrBot 管理员在未列入群聊白名单的群中也可继续使用机器人。",
+        "default": true
+      },
+      "private_whitelist_enabled": {
+        "type": "bool",
+        "description": "启用私聊白名单",
+        "hint": "开启后，只允许“私聊白名单”中的用户继续进入其他插件和 LLM；下方私聊指令豁免不受此名单限制。",
+        "default": true
+      },
+      "private_whitelist": {
+        "type": "list",
+        "description": "私聊白名单",
+        "hint": "每行填写一个用户 ID（QQ 场景填写 QQ 号）；也支持填写完整 unified_msg_origin。",
+        "default": [],
+        "items": {
+          "type": "string"
+        }
+      },
+      "private_admin_bypass": {
+        "type": "bool",
+        "description": "管理员绕过私聊白名单",
+        "hint": "开启后，AstrBot 管理员私聊时可以使用所有指令和 Agent 对话。为保证私聊仅豁免指定指令，默认关闭。",
+        "default": false
+      },
+      "private_bypass_commands": {
+        "type": "list",
+        "description": "私聊白名单豁免指令",
+        "hint": "这些根指令在私聊中无视私聊白名单。填写根指令名即可，不需要斜杠；默认仅放行 /rtlink。使用精确匹配，不会放行 /rtlinkevil。",
+        "default": [
+          "rtlink"
+        ],
+        "items": {
+          "type": "string"
+        }
+      },
+      "webchat_bypass": {
+        "type": "bool",
+        "description": "放行 WebChat",
+        "hint": "保持 AstrBot 原白名单对 WebChat 的绕过行为，避免 WebUI 调试会话被锁定。",
+        "default": true
+      },
+      "log_denied": {
+        "type": "bool",
+        "description": "记录拦截日志",
+        "hint": "记录被门禁拒绝的会话标识，但不会记录消息正文。",
+        "default": true
+      }
+    }
+  },
+  "wake": {
+    "type": "object",
+    "description": "消息唤醒",
+    "hint": "称呼、正文提及和直接 @ 的处理方式。",
+    "collapsed": true,
+    "items": {
+      "wake_enabled": {
+        "type": "bool",
+        "description": "启用插件唤醒",
+        "default": true,
+        "hint": "系统唤醒词仅保留 /，LLM 额外唤醒前缀清空；开启私聊需要唤醒前缀。"
+      },
+      "wake_names": {
+        "type": "list",
+        "description": "机器人称呼",
+        "default": [
+          "可可子"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "hint": "开头呼叫直接回复；正文提及先判断是否回复。只检查本次正文。"
+      },
+      "wake_on_at": {
+        "type": "bool",
+        "description": "允许单独 @ 机器人唤醒",
+        "default": true
+      },
+      "mention_judge_enabled": {
+        "type": "bool",
+        "description": "正文提及时由 LLM 判断是否回复",
+        "default": true,
+        "hint": "使用当前会话模型，无工具、无历史写入；超时20秒或解析失败保持沉默。沉默也消耗一次判断请求。"
+      }
+    }
+  },
+  "schedule": {
+    "type": "object",
+    "description": "群聊开放时段",
+    "hint": "按群设置北京时间的开放星期、时间和休息提示。",
+    "collapsed": true,
+    "items": {
+      "group_rest_enabled": {
+        "type": "bool",
+        "description": "启用群聊开放时段限制",
+        "default": true,
+        "hint": "仅对下方填写的群聊生效。当前北京时间的星期和时间必须同时命中一条开放规则，才能聊天与唤醒；其他时间休息。指令仍不受时段限制，但须通过白名单。升级后原有起止时间按开放时段解释。"
+      },
+      "group_rest_rules": {
+        "type": "template_list",
+        "description": "群聊开放规则",
+        "hint": "每条规则独立设置群号、开放星期、开放时间和休息提示。群号留空不生效；默认每天开放 08:00–16:00。同一群命中任意一条完整规则即可使用；全部未命中时休息，并采用该群第一条有效规则的提示。",
+        "default": [
+          {
+            "__template_key": "group_rest",
+            "group_id": "",
+            "weekdays": [
+              "星期一",
+              "星期二",
+              "星期三",
+              "星期四",
+              "星期五",
+              "星期六",
+              "星期日"
+            ],
+            "start": "08:00",
+            "end": "16:00",
+            "reply": "休息ing，工作时间：{work_start}-{work_end}"
+          }
+        ],
+        "templates": {
+          "group_rest": {
+            "name": "群聊开放时段",
+            "display_item": "group_id",
+            "items": {
+              "group_id": {
+                "type": "string",
+                "description": "群聊号",
+                "default": "",
+                "hint": "填写一个群号，也支持完整 unified_msg_origin。开放规则不会自动加入白名单，群聊须先通过现有门禁。"
+              },
+              "weekdays": {
+                "type": "list",
+                "description": "开放星期",
+                "default": [
+                  "星期一",
+                  "星期二",
+                  "星期三",
+                  "星期四",
+                  "星期五",
+                  "星期六",
+                  "星期日"
+                ],
+                "options": [
+                  "星期一",
+                  "星期二",
+                  "星期三",
+                  "星期四",
+                  "星期五",
+                  "星期六",
+                  "星期日"
+                ],
+                "items": {
+                  "type": "string"
+                },
+                "hint": "任意选择 1～7 个星期，默认全选；必须同时满足当前星期和时间才开放。本条规则在未选中的星期不提供开放窗口。跨午夜也按当前星期判断：仅选星期五、22:00–06:00，开放周五 00:00–06:00 和 22:00–24:00，周六凌晨不开放。空列表或非法值使本条规则无效并记录错误。"
+              },
+              "start": {
+                "type": "string",
+                "description": "开放开始时间",
+                "default": "08:00",
+                "hint": "北京时间 HH:MM，范围 00:00–23:59；所选星期从这一分钟起允许聊天与唤醒。"
+              },
+              "end": {
+                "type": "string",
+                "description": "开放结束时间",
+                "default": "16:00",
+                "hint": "北京时间 HH:MM；到这一分钟停止开放。早于开始时间表示每天的凌晨段和晚间段；两段均须满足当天为选中的星期。开始和结束不能相同。"
+              },
+              "reply": {
+                "type": "text",
+                "description": "休息时被 @ 的回复内容",
+                "default": "休息ing，工作时间：{work_start}-{work_end}",
+                "hint": "可填写固定文字，或使用 {work_days}、{work_start}、{work_end} 显示本条规则的开放星期、开始和结束时间。默认显示：休息ing，工作时间：08:00-16:00。兼容旧占位符 {rest_start}=开放结束时间、{rest_end}=开放开始时间；这些时间均为配置时钟值，不表示下次开放日期。多条规则时建议自行填写完整安排。"
+              }
+            }
           }
         }
       }
     }
   },
+  "credits": {
+    "type": "object",
+    "description": "积分与额度",
+    "hint": "费用、预算和流水可在插件的「积分与模型额度」管理页查看。",
+    "collapsed": true,
+    "items": {
+      "credits_enabled": {
+        "type": "bool",
+        "description": "启用积分与门禁会话额度",
+        "default": true,
+        "hint": "控制门禁唤醒会话的额度、RP 积分和戳一戳奖励。个人 / 全局模式、日月预算和模型费率在「积分与模型额度 → 计费设置」管理。"
+      },
+      "credits_insufficient_notice_interval": {
+        "type": "int",
+        "description": "被 @ 时积分不足提醒间隔（秒）",
+        "default": 300,
+        "hint": "同一平台、机器人、群聊及发送者在间隔内最多提醒一次，后续消息仍拦截但保持静默，防止与其他 bot 循环回复。默认 300 秒（5 分钟），范围 0～86400；0 表示每次提醒。重载后重新计时。"
+      }
+    }
+  },
+  "poke": {
+    "type": "object",
+    "description": "戳一戳奖励",
+    "hint": "中奖概率、积分范围、领取次数和回复样式。",
+    "collapsed": true,
+    "items": {
+      "poke_reward_enabled": {
+        "type": "bool",
+        "description": "启用戳一戳积分奖励",
+        "default": true,
+        "hint": "QQ / OneBot 用户戳本 bot 时抽奖，支持群聊和私聊；遵循白名单和群聊开放时段。中奖直接计入现有积分并追加奖励回复，原有戳一戳图片等插件继续处理。不调用默认 AI 聊天。关闭总积分开关时一并暂停。"
+      },
+      "poke_reward_probability": {
+        "type": "float",
+        "description": "戳一戳中奖概率（%）",
+        "default": 30.0,
+        "hint": "范围 0～100；30 表示 30%，100 表示必中奖，0 表示不中奖。未中奖默认不回复。"
+      },
+      "poke_reward_min": {
+        "type": "int",
+        "description": "戳一戳奖励积分下限",
+        "default": 1,
+        "hint": "1～10000 的整数，不能大于上限；在含上下限的整数区间等概率抽取。"
+      },
+      "poke_reward_max": {
+        "type": "int",
+        "description": "戳一戳奖励积分上限",
+        "default": 6,
+        "hint": "1～10000 的整数；与下限相同即固定积分。举牌图片按实际奖励数值生成。"
+      },
+      "poke_reward_cooldown_hours": {
+        "type": "float",
+        "description": "戳一戳限次周期（小时）",
+        "default": 8.0,
+        "hint": "0～8760，可填小数；默认滚动 8 小时。0 表示不限次数，但重复上报的同一通知仍不重复抽奖。冷却记录保存到数据库，重载或重启后保留。"
+      },
+      "poke_reward_max_times": {
+        "type": "int",
+        "description": "每个周期可触发次数",
+        "default": 1,
+        "hint": "1～1000。按同一个 QQ 用户共享计次，跨群、私聊及同库的多个 bot 不另开次数。默认过去 8 小时最多中奖 1 次，满额时静默。"
+      },
+      "poke_reward_count_mode": {
+        "type": "string",
+        "description": "戳一戳限次方式",
+        "default": "success",
+        "options": [
+          "success",
+          "attempt"
+        ],
+        "hint": "success：仅中奖消耗次数，没中奖可继续尝试；attempt：每次有效尝试都消耗次数。次数用完后的戳一戳不会延长冷却。"
+      },
+      "poke_reward_reply_mode": {
+        "type": "string",
+        "description": "戳一戳中奖回复方式",
+        "default": "image",
+        "options": [
+          "text",
+          "image",
+          "both"
+        ],
+        "hint": "text：仅自定义文字；image：随机表情的可可子举牌图片；both：图片和文字。图片失败时自动改发文字，积分只发一次。"
+      },
+      "poke_reward_reply": {
+        "type": "text",
+        "description": "戳一戳中奖回复文字",
+        "default": "嘿嘿，送你一点小幸运～\n积分+{points}",
+        "hint": "支持 {points} 本次积分、{balance} 入账后余额、{nickname} 用户昵称，最多 1000 字。没有 {points} 时自动追加“积分+实际数值”。仅图片模式下作为图片失败时的备用回复。"
+      }
+    }
+  },
+  "grouped_config_migrated": {
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "credits_enabled": {
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "credits_insufficient_notice_interval": {
+    "type": "int",
+    "default": 300,
+    "invisible": true
+  },
+  "poke_reward_enabled": {
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "poke_reward_probability": {
+    "type": "float",
+    "default": 30.0,
+    "invisible": true
+  },
+  "poke_reward_min": {
+    "type": "int",
+    "default": 1,
+    "invisible": true
+  },
+  "poke_reward_max": {
+    "type": "int",
+    "default": 6,
+    "invisible": true
+  },
+  "poke_reward_cooldown_hours": {
+    "type": "float",
+    "default": 8.0,
+    "invisible": true
+  },
+  "poke_reward_max_times": {
+    "type": "int",
+    "default": 1,
+    "invisible": true
+  },
+  "poke_reward_count_mode": {
+    "type": "string",
+    "default": "success",
+    "invisible": true
+  },
+  "poke_reward_reply_mode": {
+    "type": "string",
+    "default": "image",
+    "invisible": true
+  },
+  "poke_reward_reply": {
+    "type": "text",
+    "default": "嘿嘿，送你一点小幸运～\n积分+{points}",
+    "invisible": true
+  },
+  "wake_enabled": {
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "wake_names": {
+    "type": "list",
+    "default": [
+      "可可子"
+    ],
+    "invisible": true
+  },
+  "mention_judge_enabled": {
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "wake_on_at": {
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "group_rest_enabled": {
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "group_rest_rules": {
+    "type": "list",
+    "default": [
+      {
+        "__template_key": "group_rest",
+        "group_id": "",
+        "weekdays": [
+          "星期一",
+          "星期二",
+          "星期三",
+          "星期四",
+          "星期五",
+          "星期六",
+          "星期日"
+        ],
+        "start": "08:00",
+        "end": "16:00",
+        "reply": "休息ing，工作时间：{work_start}-{work_end}"
+      }
+    ],
+    "invisible": true
+  },
   "group_whitelist_enabled": {
     "type": "bool",
-    "description": "启用群聊白名单",
-    "hint": "开启后，只允许“群聊白名单”中的群聊消息继续进入其他插件和 LLM。名单为空时拒绝全部群聊，但管理员绕过仍可生效。",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "group_whitelist": {
     "type": "list",
-    "description": "群聊白名单",
-    "hint": "每行填写一个群号；也支持填写完整 unified_msg_origin。只需命中其中一种标识即可放行。",
     "default": [],
-    "items": {
-      "type": "string"
-    }
+    "invisible": true
   },
   "private_whitelist_enabled": {
     "type": "bool",
-    "description": "启用私聊白名单",
-    "hint": "开启后，只允许“私聊白名单”中的用户继续进入其他插件和 LLM；下方私聊指令豁免不受此名单限制。",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "private_whitelist": {
     "type": "list",
-    "description": "私聊白名单",
-    "hint": "每行填写一个用户 ID（QQ 场景填写 QQ 号）；也支持填写完整 unified_msg_origin。",
     "default": [],
-    "items": {
-      "type": "string"
-    }
+    "invisible": true
   },
   "private_bypass_commands": {
     "type": "list",
-    "description": "私聊白名单豁免指令",
-    "hint": "这些根指令在私聊中无视私聊白名单。填写根指令名即可，不需要斜杠；默认仅放行 /rtlink。使用精确匹配，不会放行 /rtlinkevil。",
     "default": [
       "rtlink"
     ],
-    "items": {
-      "type": "string"
-    }
+    "invisible": true
   },
   "group_admin_bypass": {
     "type": "bool",
-    "description": "管理员绕过群聊白名单",
-    "hint": "AstrBot 管理员在未列入群聊白名单的群中也可继续使用机器人。",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "private_admin_bypass": {
     "type": "bool",
-    "description": "管理员绕过私聊白名单",
-    "hint": "开启后，AstrBot 管理员私聊时可以使用所有指令和 Agent 对话。为保证私聊仅豁免指定指令，默认关闭。",
-    "default": false
+    "default": false,
+    "invisible": true
   },
   "webchat_bypass": {
     "type": "bool",
-    "description": "放行 WebChat",
-    "hint": "保持 AstrBot 原白名单对 WebChat 的绕过行为，避免 WebUI 调试会话被锁定。",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "log_denied": {
     "type": "bool",
-    "description": "记录拦截日志",
-    "hint": "记录被门禁拒绝的会话标识，但不会记录消息正文。",
-    "default": true
+    "default": true,
+    "invisible": true
   }
 }

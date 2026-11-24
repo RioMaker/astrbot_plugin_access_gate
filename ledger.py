@@ -9,8 +9,10 @@ import sys
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+
+from .pricing import CHINA_TZ, OFFICIAL_MODEL_PRICES, PRICE_CHECKED_ON
 
 MONEY = 1_000_000_000
 POINTS = 1_000_000
@@ -78,6 +80,7 @@ class Ledger:
                 actor TEXT NOT NULL, action TEXT NOT NULL, details TEXT NOT NULL);
             PRAGMA user_version=1;
         """)
+        self._upgrade_price_catalog()
         # An interrupted process may already have sent its request upstream.
         recovered = []
         for row in self.db.execute(
@@ -94,6 +97,38 @@ class Ledger:
                 recovered.append(row["request_id"])
         self.db.commit()
         FAILED_REQUESTS.difference_update(recovered)
+
+    def _upgrade_price_catalog(self):
+        # Only extend the untouched v1 price table. An edited table also
+        # defines which relay models the administrator permits for billing.
+        migration = "upgrade_flash_only_catalog_2_5"
+        with self.transaction():
+            if self.db.execute(
+                "SELECT 1 FROM audit WHERE action=? LIMIT 1", (migration,)
+            ).fetchone():
+                return
+            row = self.db.execute("SELECT data FROM settings WHERE id=1").fetchone()
+            values = json.loads(row[0]) if row else {}
+            extend = values.get("model_prices") == {
+                "deepseek-flash": {
+                    "offpeak": {"input": 1, "cached": 0.02, "output": 4},
+                    "peak": {"input": 2, "cached": 0.04, "output": 8},
+                }
+            }
+            if extend:
+                values["model_prices"] = OFFICIAL_MODEL_PRICES
+                self.db.execute(
+                    "UPDATE settings SET data=?, revision=revision+1 WHERE id=1",
+                    (json.dumps(values, ensure_ascii=False),),
+                )
+            # The audit entry is also a one-time marker. A later deliberate
+            # removal of Pro must survive restart, including on a fresh DB.
+            self._audit(
+                datetime.now(CHINA_TZ).isoformat(),
+                "system",
+                migration,
+                {"checked_on": PRICE_CHECKED_ON, "extended": extend},
+            )
 
     @contextmanager
     def transaction(self):
@@ -507,14 +542,17 @@ class Ledger:
             )
         return self.get_request(request_id)
 
-    def users(self, query, page, ratio):
+    def users(self, query, page, ratio, account=None):
         with self.lock:
-            where, args = "user_id LIKE ? OR name LIKE ?", [f"%{query}%"] * 2
+            if account:
+                where, args = "platform=? AND user_id=?", account
+            else:
+                where, args = "user_id LIKE ? OR name LIKE ?", [f"%{query}%"] * 2
             total = self.db.execute(
                 f"SELECT COUNT(*) FROM users WHERE {where}", args
             ).fetchone()[0]
             rows = self.db.execute(
-                f"SELECT * FROM users WHERE {where} ORDER BY balance DESC,user_id LIMIT 30 OFFSET ?",
+                f"SELECT * FROM users WHERE {where} ORDER BY balance DESC,user_id,platform LIMIT 30 OFFSET ?",
                 [*args, (page - 1) * 30],
             ).fetchall()
             items = []
@@ -542,10 +580,23 @@ class Ledger:
     def history(self, filters):
         with self.lock:
             clauses, args = [], []
-            for key in ("day", "user_id", "group_id", "platform", "kind", "status"):
+            for key in ("day", "user_id", "group_id", "platform", "kind"):
                 if filters.get(key):
                     clauses.append(key + "=?")
                     args.append(filters[key])
+            if filters.get("status") == "pending":
+                clauses.append("status IN ('reserved','unknown')")
+            elif filters.get("status"):
+                clauses.append("status=?")
+                args.append(filters["status"])
+            if filters.get("scope") == "private":
+                clauses.append("group_id=''")
+            if filters.get("since"):
+                clauses.append("day>=? AND occurred_at>=?")
+                args.extend((filters["since"][:10], filters["since"]))
+            if filters.get("until"):
+                clauses.append("day<=? AND occurred_at<?")
+                args.extend((filters["until"][:10], filters["until"]))
             where = " AND ".join(clauses) or "1=1"
             total = self.db.execute(
                 f"SELECT COUNT(*) FROM ledger WHERE {where}", args

@@ -1,8 +1,8 @@
 import asyncio
-from pathlib import Path
+import json
 import sys
 import unittest
-
+from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 PLUGIN_DIR = TESTS_DIR.parent
@@ -10,7 +10,6 @@ sys.path.insert(0, str(TESTS_DIR))
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from mock_astrbot import Context, MockEvent, install
-
 
 LOGGER = install()
 import main
@@ -35,6 +34,39 @@ class AccessGatePluginTests(unittest.TestCase):
                 event = MockEvent(private=True, message=message)
                 self.run_gate(plugin, event)
                 self.assertFalse(event.stopped)
+
+    def test_grouped_upgrade_preserves_old_values_and_subsequent_edits(self):
+        schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text("utf-8"))
+        # AstrBot normalizes the saved document against the new schema first.
+        normalized = {
+            key: {k: child["default"] for k, child in field["items"].items()}
+            if field["type"] == "object"
+            else field["default"]
+            for key, field in schema.items()
+        }
+        normalized.update(
+            group_whitelist=["20001"],
+            private_admin_bypass=True,
+            wake_enabled=False,
+            credits_enabled=False,
+            poke_reward_probability=0,
+            group_rest_rules=[],
+        )
+        context = Context(normalized)
+        plugin = main.AccessGatePlugin(context)
+        config = plugin.config
+        self.assertTrue(config.saved)
+        self.assertEqual(config["access"]["group_whitelist"], ["20001"])
+        self.assertTrue(plugin._bool("private_admin_bypass", False))
+        self.assertFalse(plugin._bool("wake_enabled", True))
+        self.assertFalse(plugin._bool("credits_enabled", True))
+        self.assertEqual(config["poke"]["poke_reward_probability"], 0)
+        self.assertEqual(config["schedule"]["group_rest_rules"], [])
+        plugin._save_import("group_whitelist", ["20002"])
+        config["access"]["private_admin_bypass"] = False
+        reloaded = main.AccessGatePlugin(context)
+        self.assertFalse(reloaded._bool("private_admin_bypass", True))
+        self.assertEqual(reloaded._entries("group_whitelist"), {"20001", "20002"})
 
     def test_original_private_rtlink_text_is_recognized(self) -> None:
         plugin = self.make_plugin()
@@ -141,16 +173,18 @@ class AccessGatePluginTests(unittest.TestCase):
         content: str,
     ) -> list[str]:
         async def collect() -> list[str]:
-            return [result async for result in plugin.accessgate_command(event, content)]
+            return [
+                result async for result in plugin.accessgate_command(event, content)
+            ]
 
         return asyncio.run(collect())
 
     def test_batch_import_accepts_json_fragment_and_deduplicates(self) -> None:
         plugin = self.make_plugin(group_whitelist=["20001"])
         event = MockEvent(private=True, admin=True)
-        content = '''import group "id_whitelist": [
+        content = """import group "id_whitelist": [
           "20001", "20002", "20002"
-        ],'''
+        ],"""
         results = self.run_import(plugin, event, content)
         self.assertTrue(event.stopped)
         self.assertEqual(

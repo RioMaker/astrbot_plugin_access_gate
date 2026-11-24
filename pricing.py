@@ -13,6 +13,17 @@ from typing import Any
 
 CHINA_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 PRICE_SOURCE = "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/"
+PRICE_CHECKED_ON = "2026-11-24"
+OFFICIAL_MODEL_PRICES = {
+    "deepseek-flash": {
+        "offpeak": {"input": 1, "cached": 0.02, "output": 4},
+        "peak": {"input": 2, "cached": 0.04, "output": 8},
+    },
+    "deepseek-v4-pro": {
+        "offpeak": {"input": 4.5, "cached": 0.15, "output": 13.5},
+        "peak": {"input": 9, "cached": 0.30, "output": 27},
+    },
+}
 HOLIDAY_SOURCE = (
     "https://www.beijing.gov.cn/zhengce/zhengcefagui/202511/t20251104_4258873.html"
 )
@@ -50,12 +61,7 @@ DEFAULTS = {
     "charged_plugins": [],  # Legacy compatibility only; independent plugins pass through.
     "group_overrides": {},
     "holidays": HOLIDAYS_2026.copy(),
-    "model_prices": {
-        "deepseek-flash": {
-            "offpeak": {"input": 1, "cached": 0.02, "output": 4},
-            "peak": {"input": 2, "cached": 0.04, "output": 8},
-        }
-    },
+    "model_prices": copy.deepcopy(OFFICIAL_MODEL_PRICES),
 }
 MAX_COUNTER = 2**53 - 1
 MAX_AMOUNT = Decimal(1000000000)
@@ -198,6 +204,7 @@ def price_snapshot(settings: dict, model: str, started_datetime: datetime) -> di
         and (9 * 60 <= minute < 12 * 60 or 14 * 60 <= minute < 18 * 60)
     )
     tier = "peak" if peak else "offpeak"
+    official = cards[priced_model] == OFFICIAL_MODEL_PRICES.get(priced_model)
     return {
         "model": model,
         "priced_model": priced_model,
@@ -207,9 +214,8 @@ def price_snapshot(settings: dict, model: str, started_datetime: datetime) -> di
         "currency": "CNY",
         "price_unit_tokens": 1_000_000,
         "started_at": local.isoformat(),
-        "price_source": PRICE_SOURCE
-        if priced_model == "deepseek-flash"
-        else "configured",
+        "price_source": PRICE_SOURCE if official else "configured",
+        "price_checked_on": PRICE_CHECKED_ON if official else None,
         "calendar_warning": _calendar_warning(settings, local.year),
     }
 
@@ -399,6 +405,11 @@ def quote(settings: dict) -> dict:
         models.append({"model": model, "tiers": tiers})
     return {
         "currency": "CNY",
+        "official_catalog": {
+            "source": PRICE_SOURCE,
+            "checked_on": PRICE_CHECKED_ON,
+            "models": copy.deepcopy(OFFICIAL_MODEL_PRICES),
+        },
         "points_per_yuan": settings["points_per_yuan"],
         "yuan_per_point": float(unit_yuan),
         "rp_rewards": [

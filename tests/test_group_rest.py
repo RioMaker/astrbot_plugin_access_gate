@@ -710,12 +710,15 @@ class GroupRestTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        defaults = {key: value.get("default") for key, value in schema.items()}
+        schedule = schema["schedule"]["items"]
+        defaults = {
+            "schedule": {key: value["default"] for key, value in schedule.items()}
+        }
         plugin = main.AccessGatePlugin(Context("", {}), defaults)
         self.assertEqual(plugin.rest_rules, ())
-        default = defaults["group_rest_rules"][0]
+        default = defaults["schedule"]["group_rest_rules"][0]
         self.assertEqual((default["start"], default["end"]), ("08:00", "16:00"))
-        template = schema["group_rest_rules"]["templates"][default["__template_key"]][
+        template = schedule["group_rest_rules"]["templates"][default["__template_key"]][
             "items"
         ]
         self.assertEqual(default["weekdays"], self.WEEKDAYS)

@@ -73,7 +73,6 @@ def test_unknown_models_fail_and_only_known_aliases_get_flash_rates():
             == "deepseek-flash"
         )
     for unknown in (
-        "deepseek-v4-pro",
         "deepseek-v4-pro-0731",
         "deepseek-chat",
         "deepseek-flash-fake",
@@ -82,6 +81,25 @@ def test_unknown_models_fail_and_only_known_aliases_get_flash_rates():
     ):
         with pytest.raises(ValueError, match="尚未配置"):
             price_snapshot({}, unknown, stamp("10-29", 9))
+
+
+def test_pro_tariff_and_custom_price_provenance():
+    off = price_snapshot({}, "deepseek-v4-pro", stamp("11-24", 7))
+    peak = price_snapshot({}, "deepseek-v4-pro", stamp("11-24", 9))
+    assert off["rates"] == {"input": 4.5, "cached": 0.15, "output": 13.5}
+    assert peak["rates"] == {"input": 9, "cached": 0.30, "output": 27}
+    catalog = quote({})["official_catalog"]
+    assert off["price_source"] == peak["price_source"] == catalog["source"]
+    assert off["price_checked_on"] == catalog["checked_on"] == "2026-11-24"
+    assert cost_yuan(
+        {"cache_miss_tokens": 98000, "cache_hit_tokens": 0, "output_tokens": 2000}, peak
+    ) == Decimal("0.936")
+    for model in catalog["models"]:
+        values = validate_settings({})
+        values["model_prices"][model]["peak"]["output"] = 99
+        custom = price_snapshot(values, model, stamp("11-24", 9))
+        assert custom["price_source"] == "configured"
+        assert custom["price_checked_on"] is None
 
 
 @pytest.mark.parametrize(

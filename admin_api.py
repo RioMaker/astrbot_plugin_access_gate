@@ -235,7 +235,12 @@ class AdminAPI:
     async def users(self) -> Any:
         async def operation(_actor: str) -> Any:
             return await _result(
-                self.plugin.economy.users(self._query("query"), self._page())
+                self.plugin.economy.users(
+                    self._query("query"),
+                    self._page(),
+                    platform=self._query("platform"),
+                    user_id=self._query("user_id"),
+                )
             )
 
         return await self._run(operation)
@@ -256,7 +261,17 @@ class AdminAPI:
         async def operation(_actor: str) -> Any:
             filters = {
                 key: self._query(key)
-                for key in ("platform", "user_id", "group_id", "kind", "status", "day")
+                for key in (
+                    "platform",
+                    "user_id",
+                    "group_id",
+                    "kind",
+                    "status",
+                    "day",
+                    "scope",
+                    "since",
+                    "until",
+                )
             }
             filters["page"] = self._page()
             data = dict(await _result(self.plugin.economy.ledger(filters)))

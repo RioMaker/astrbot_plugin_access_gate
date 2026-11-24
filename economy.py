@@ -270,10 +270,17 @@ class Economy:
             raise ValueError("页码超出范围。")
         return number
 
-    async def users(self, query="", page=1):
+    async def users(self, query="", page=1, *, platform="", user_id=""):
         query = identifier(query, "搜索内容", required=False)
+        account = (
+            (identifier(platform, "平台"), identifier(user_id, "用户"))
+            if platform or user_id
+            else None
+        )
         ratio = (await self.settings())["values"]["points_per_yuan"]
-        return await asyncio.to_thread(self.store.users, query, self.page(page), ratio)
+        return await asyncio.to_thread(
+            self.store.users, query, self.page(page), ratio, account
+        )
 
     async def balance(self, platform, user_id):
         return await asyncio.to_thread(self.store.balance, platform, user_id)
@@ -282,8 +289,28 @@ class Economy:
         clean = {
             key: identifier(str(value), "筛选条件", required=False)
             for key, value in filters.items()
-            if key in {"day", "user_id", "group_id", "platform", "kind", "status"}
+            if key
+            in {"day", "user_id", "group_id", "platform", "kind", "status", "scope"}
         }
+        if clean.get("scope") not in (None, "", "private"):
+            raise ValueError("会话范围无效。")
+        if clean.get("scope") == "private" and clean.get("group_id"):
+            raise ValueError("仅私聊筛选不能同时指定群号。")
+        for key in ("since", "until"):
+            if filters.get(key):
+                try:
+                    stamp = datetime.fromisoformat(identifier(filters[key], "时间"))
+                    if stamp.tzinfo is None:
+                        raise ValueError
+                    clean[key] = stamp.astimezone(BEIJING).isoformat()
+                except (ValueError, OverflowError):
+                    raise ValueError("统计时段必须包含有效日期、时间和时区。") from None
+        if (
+            clean.get("since")
+            and clean.get("until")
+            and clean["since"] >= clean["until"]
+        ):
+            raise ValueError("统计起始时间须早于结束时间。")
         clean["page"] = self.page(filters.get("page", 1))
         return await asyncio.to_thread(self.store.history, clean)
 

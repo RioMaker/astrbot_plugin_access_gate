@@ -127,6 +127,12 @@ def consumption_report(db, now, period):
         "period": period,
         "start": start.isoformat(),
         "end": now.isoformat(),
+        # Ledger drill-down uses half-open intervals, including requests at
+        # exactly 'now' and excluding the start of the rolling hour.
+        "until": (now + timedelta(microseconds=1)).isoformat(),
+        "recent_since": (
+            now - timedelta(hours=1) + timedelta(microseconds=1)
+        ).isoformat(),
         "timezone": "Asia/Shanghai",
         "cost_yuan": amount(total[0], MONEY),
         "requests": total[1],

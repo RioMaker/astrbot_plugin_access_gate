@@ -303,7 +303,10 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
     async def test_search_and_pagination_are_bounded(self):
         self.request.query = {"query": "  用户1  ", "page": "2"}
         self.assertEqual((await self.api.users())["status"], 200)
-        self.economy.users.assert_awaited_once_with("用户1", 2)
+        self.economy.users.assert_awaited_once_with("用户1", 2, platform="", user_id="")
+        self.request.query = {"user_id": "123", "platform": "qq"}
+        self.assertEqual((await self.api.users())["status"], 200)
+        self.economy.users.assert_awaited_with("", 1, platform="qq", user_id="123")
         for raw in ("0", "-1", "nan", "1.5", "1000001"):
             self.request.query["page"] = raw
             self.assertEqual((await self.api.users())["status"], 400)
@@ -314,6 +317,9 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
         self.request.query = {
             "day": "2026-10-29",
             "kind": "rp",
+            "scope": "private",
+            "since": "2026-10-29T08:00:00+08:00",
+            "until": "2026-10-29T09:00:00+08:00",
             "page": "3",
             "sql": "ignored",
         }
@@ -321,6 +327,8 @@ class AdminAPITests(unittest.IsolatedAsyncioTestCase):
         filters = self.economy.ledger.await_args.args[0]
         self.assertEqual(filters["day"], "2026-10-29")
         self.assertEqual(filters["page"], 3)
+        for key in ("scope", "since", "until"):
+            self.assertEqual(filters[key], self.request.query[key])
         self.assertNotIn("sql", filters)
 
     async def test_settings_require_object_and_integer_revision(self):

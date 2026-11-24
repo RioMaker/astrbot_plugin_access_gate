@@ -8,6 +8,7 @@ from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -19,7 +20,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、个人/全局积分模式、日月预算与消耗分析"
-PLUGIN_VERSION = "2.4.3"
+PLUGIN_VERSION = "2.5.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are
@@ -35,6 +36,7 @@ DEFAULT_REST_END = "16:00"
 DEFAULT_REST_REPLY = "休息ing，工作时间：{work_start}-{work_end}"
 REST_TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 REST_WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+CONFIG_GROUPS = ("access", "wake", "schedule", "credits", "poke")
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,13 @@ class AccessGatePlugin(Star):
         self.config: dict[str, Any] = (
             fallback_config if fallback_config is not None else {}
         )
+        self._config_groups = {
+            key: group
+            for group in CONFIG_GROUPS
+            if isinstance(self.config.get(group), dict)
+            for key in self.config[group]
+        }
+        self._migrate_grouped_config()
         self.rest_rules = self._load_rest_rules()
         self.economy = None
         self.billing_runtime = None
@@ -107,9 +116,36 @@ class AccessGatePlugin(Star):
             "[access_gate] 已加载；请确保 AstrBot 核心 enable_id_white_list 已关闭"
         )
 
-    async def initialize(self):
-        from pathlib import Path
+    def _config_for(self, key: str) -> dict:
+        group = self._config_groups.get(key)
+        return self.config[group] if group else self.config
 
+    def _migrate_grouped_config(self) -> None:
+        if not self._config_groups or self.config.get("grouped_config_migrated"):
+            return
+        # AstrBot fills the new groups before constructing the plugin. Hidden
+        # legacy fields preserve the old values through that normalization.
+        schema = json.loads(
+            Path(__file__).with_name("_conf_schema.json").read_text("utf-8")
+        )
+        for key, group in self._config_groups.items():
+            if (
+                key in self.config
+                and key in schema
+                and self.config[key] != schema[key]["default"]
+                and self.config[group][key] == schema[group]["items"][key]["default"]
+            ):
+                self.config[group][key] = self.config[key]
+        self.config["grouped_config_migrated"] = True
+        save = getattr(self.config, "save_config", None)
+        if callable(save):
+            try:
+                save()
+            except Exception:
+                self.config["grouped_config_migrated"] = False
+                raise
+
+    async def initialize(self):
         from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
         from .admin_api import AdminAPI
@@ -143,7 +179,9 @@ class AccessGatePlugin(Star):
             event
         ):
             return True
-        interval = self.config.get("credits_insufficient_notice_interval", 300)
+        interval = self._config_for("credits_insufficient_notice_interval").get(
+            "credits_insufficient_notice_interval", 300
+        )
         if (
             isinstance(interval, bool)
             or not isinstance(interval, int)
@@ -206,7 +244,7 @@ class AccessGatePlugin(Star):
         if self.economy is None:
             return True
         try:
-            settings = PokeSettings.from_config(self.config)
+            settings = PokeSettings.from_config(self.config.get("poke", self.config))
             receipt = await self.economy.award_poke(event, notice, settings)
         except Exception:  # noqa: BLE001 - contain failures at the reward event boundary
             logger.exception("[access_gate] 戳一戳奖励失败")
@@ -315,7 +353,7 @@ class AccessGatePlugin(Star):
         return frozenset(weekdays)
 
     def _load_rest_rules(self) -> tuple[GroupRestRule, ...]:
-        raw = self.config.get("group_rest_rules", [])
+        raw = self._config_for("group_rest_rules").get("group_rest_rules", [])
         if not isinstance(raw, list):
             logger.error("[access_gate] 群聊开放规则必须是列表，已忽略")
             return ()
@@ -493,7 +531,7 @@ class AccessGatePlugin(Star):
             await event.send(event.plain_result(reply))
 
     def _bool(self, key: str, default: bool) -> bool:
-        value = self.config.get(key, default)
+        value = self._config_for(key).get(key, default)
         if isinstance(value, str):
             normalized = value.strip().casefold()
             if normalized in {"true", "1", "yes", "on", "是", "开"}:
@@ -507,7 +545,7 @@ class AccessGatePlugin(Star):
         key: str,
         default: Iterable[str] = (),
     ) -> set[str]:
-        raw = self.config.get(key, list(default))
+        raw = self._config_for(key).get(key, list(default))
         if isinstance(raw, str):
             values: Iterable[object] = ENTRY_SEPARATOR.split(raw)
         elif isinstance(raw, Iterable) and not isinstance(raw, (dict, bytes)):
@@ -574,7 +612,7 @@ class AccessGatePlugin(Star):
         )
 
     def _current_entries(self, key: str) -> list[str]:
-        raw = self.config.get(key, [])
+        raw = self._config_for(key).get(key, [])
         if isinstance(raw, str):
             values: Iterable[object] = ENTRY_SEPARATOR.split(raw)
         elif isinstance(raw, Iterable) and not isinstance(raw, (dict, bytes)):
@@ -586,9 +624,10 @@ class AccessGatePlugin(Star):
     def _save_import(self, key: str, imported: list[str]) -> tuple[int, int]:
         existing = self._current_entries(key)
         merged = self._dedupe_entries((*existing, *imported))
-        had_key = key in self.config
-        previous = self.config.get(key)
-        self.config[key] = merged
+        section = self._config_for(key)
+        had_key = key in section
+        previous = section.get(key)
+        section[key] = merged
         try:
             save_config = getattr(self.config, "save_config", None)
             if not callable(save_config):
@@ -596,9 +635,9 @@ class AccessGatePlugin(Star):
             save_config()
         except Exception:
             if had_key:
-                self.config[key] = previous
+                section[key] = previous
             else:
-                self.config.pop(key, None)
+                section.pop(key, None)
             raise
         return len(merged) - len(existing), len(merged)
 

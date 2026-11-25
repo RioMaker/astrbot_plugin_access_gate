@@ -103,6 +103,8 @@
             </div><div id="mapping" class="mapping"></div>
           </div>
           <div class="panel"><div class="section-heading"><h3>模型费率</h3><small>元 / 百万 Token</small></div>
+            <label class="compact"><input name="block_unpriced_models" type="checkbox" role="switch" aria-describedby="unpriced-models-help" checked>未配置价格时拦截</label>
+            <p id="unpriced-models-help" class="hint">关闭后放行没有价目的模型，此类调用跳过积分扣分和额度核算。</p>
             <div id="rates-table" class="table-wrap"></div>
             <div class="detail-line"><p id="catalog-source" class="muted"></p><button id="apply-catalog" class="secondary" type="button" disabled>套用本版官方价</button></div>
             <details><summary>编辑模型价目表</summary><label>模型价格 JSON<textarea name="model_prices" rows="12" spellcheck="false" required></textarea><small>每个模型填写 offpeak、peak 两档，每档包含 input（未命中输入）、cached（命中输入）和 output（输出）。</small></label></details>

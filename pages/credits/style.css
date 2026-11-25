@@ -93,6 +93,7 @@ textarea, pre { font: 12px/1.65 Consolas, monospace; }
 textarea { resize: vertical; }
 label { display: grid; align-content: start; gap: 5px; font-size: 13px; font-weight: 600; }
 label.compact { display: flex; align-items: center; white-space: nowrap; }
+input[role="switch"] { width: auto; margin: 0; accent-color: var(--accent); }
 .form-grid, .filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
 .filters { grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; }
 .filter-buttons { flex-wrap: wrap; }

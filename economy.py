@@ -165,6 +165,8 @@ class Economy:
             started = now()
             model, provider_id = self.provider_info(provider, kwargs)
             price = price_snapshot(settings, model, started)
+            if price is None:
+                return None
             charged = not settings["global_mode"]
             overrides = settings["group_overrides"]
             group_limit = overrides.get(

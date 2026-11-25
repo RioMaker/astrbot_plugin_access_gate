@@ -20,7 +20,7 @@ from astrbot.core.star.filter.command import GreedyStr
 PLUGIN_NAME = "astrbot_plugin_access_gate"
 PLUGIN_AUTHOR = "Rio"
 PLUGIN_DESC = "白名单与唤醒、个人/全局积分模式、日月预算与消耗分析"
-PLUGIN_VERSION = "2.5.0"
+PLUGIN_VERSION = "2.6.0"
 PLUGIN_REPO = ""
 
 # Keep this above ordinary command/listener priorities so denied events are

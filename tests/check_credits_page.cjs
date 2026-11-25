@@ -84,6 +84,9 @@ async function checkPage() {
     assert.match(await page.locator("#rates-table").innerText(), /4\.24/);
     assert.match(await page.locator("#catalog-source").innerText(), /2026-11-24/);
     assert.equal(await page.locator("#plugins-list img, #plugins-list input").count(), 0);
+    const blockUnpriced = page.getByRole("switch", {name:"未配置价格时拦截"});
+    assert.equal(await blockUnpriced.isChecked(), true);
+    await blockUnpriced.uncheck();
     await field("settings-form","points_per_yuan").fill("40");
     await textIncludes("rates-table","8.48");
     await open("overview"); await open("settings");
@@ -95,6 +98,9 @@ async function checkPage() {
     const applied = JSON.parse(await prices.inputValue());
     assert.equal(applied["deepseek-flash"].peak.output, 8); assert.deepEqual(applied.relay, custom.relay);
     await page.getByRole("button",{name:"保存计费设置"}).click(); await textIncludes("revision", "配置版本 2");
+    await open("overview"); await open("settings"); await textIncludes("revision", "配置版本 2");
+    assert.equal(await blockUnpriced.isChecked(), false);
+    await blockUnpriced.check();
     await field("settings-form","global_mode").selectOption("true"); await field("settings-form","global_monthly_yuan").fill("25");
     await page.getByRole("button",{name:"保存计费设置"}).click(); await textIncludes("revision", "配置版本 3");
     assert.match(await page.locator("#mapping").innerText(), /不扣个人积分/);

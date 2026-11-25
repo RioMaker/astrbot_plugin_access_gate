@@ -320,6 +320,7 @@ async function loadSettings(request, discardDraft = false) {
   state.values = settings.values; state.revision = settings.revision; state.catalog = quote.official_catalog;
   const form = $("settings-form");
   form.elements.global_mode.value = String(Boolean(state.values.global_mode));
+  form.elements.block_unpriced_models.checked = state.values.block_unpriced_models ?? true;
   for (const key of numericKeys) form.elements[key].value = state.values[key] ?? "";
   for (const key of jsonKeys) form.elements[key].value = pretty(state.values[key] ?? (key === "holidays" ? [] : {}));
   $("revision").textContent = `配置版本 ${state.revision}`;
@@ -489,7 +490,12 @@ $("settings-form").addEventListener("submit", (event) => {
   event.preventDefault(); const form = event.currentTarget;
   action(event.submitter, async () => {
     if (!state.values) throw new Error("配置尚未加载，不能保存");
-    const values = { ...state.values, global_mode: form.elements.global_mode.value === "true", charged_plugins: [] };
+    const values = {
+      ...state.values,
+      global_mode: form.elements.global_mode.value === "true",
+      block_unpriced_models: form.elements.block_unpriced_models.checked,
+      charged_plugins: [],
+    };
     for (const key of numericKeys) values[key] = Number(form.elements[key].value);
     for (const key of jsonKeys) {
       try { values[key] = parseJSONField(form, key); }

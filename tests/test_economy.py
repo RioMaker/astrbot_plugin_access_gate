@@ -64,6 +64,7 @@ def test_v1_price_upgrade_only_extends_untouched_table_once(
     run(old.settle(ticket, response(), False))
     snapshot = old.store.get_request(ticket["request_id"])
     values = run(old.settings())["values"]
+    del values["block_unpriced_models"]
     del values["model_prices"]["deepseek-v4-pro"]
     if custom:
         values["model_prices"]["deepseek-flash"]["peak"]["output"] = 12
@@ -78,6 +79,7 @@ def test_v1_price_upgrade_only_extends_untouched_table_once(
     try:
         saved = run(upgraded.settings())
         assert saved["revision"] == (1 if custom else 2)
+        assert saved["values"]["block_unpriced_models"] is True
         assert ("deepseek-v4-pro" in saved["values"]["model_prices"]) is (not custom)
         assert (
             saved["values"]["model_prices"]["deepseek-flash"]
@@ -438,6 +440,27 @@ def test_missing_event_and_unknown_model_fail_before_reserve(service):
     with pytest.raises(RuntimeGateDenied):
         run(service.begin(Event(), "", PROVIDER, {"model": "unknown-expensive-model"}))
     assert run(service.ledger({}))["total"] == 0
+
+
+def test_unpriced_model_switch_skips_accounting_only_for_unpriced_requests(service):
+    event = Event()
+    unpriced = {"model": "new-unpriced-model"}
+    settings(service, block_unpriced_models=False)
+
+    ticket = run(service.begin(event, "", PROVIDER, unpriced))
+    assert ticket is None
+    assert run(service.settle(ticket, response(), False)) is None
+    assert run(service.overview())["global"]["reserved_yuan"] == 0
+    assert run(service.ledger({}))["total"] == 0
+
+    award(service)
+    ticket = run(service.begin(event, "", PROVIDER, {"model": "deepseek-v4-flash"}))
+    assert ticket["price"]["priced_model"] == "deepseek-flash"
+    assert run(service.settle(ticket, response(), False)) == Decimal("2.12")
+
+    settings(service, block_unpriced_models=True)
+    with pytest.raises(RuntimeGateDenied, match="尚未配置价格"):
+        run(service.begin(event, "", PROVIDER, unpriced))
 
 
 def test_admin_adjust_idempotency_and_conflict(service):

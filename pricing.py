@@ -54,6 +54,7 @@ DEFAULTS = {
     "rp_base_points": 19,
     "rp_step_points": 0.02,
     "global_mode": False,
+    "block_unpriced_models": True,
     "global_daily_yuan": 10,
     "global_monthly_yuan": 300,
     "group_daily_yuan": 2,
@@ -104,8 +105,9 @@ def validate_settings(values: dict) -> dict:
         raise ValueError("未知积分配置字段：" + ", ".join(sorted(map(str, unknown))))
     result = copy.deepcopy(DEFAULTS)
     result.update(copy.deepcopy(values))
-    if not isinstance(result["global_mode"], bool):
-        raise ValueError("global_mode 必须是布尔值")
+    for name in ("global_mode", "block_unpriced_models"):
+        if not isinstance(result[name], bool):
+            raise ValueError(f"{name} 必须是布尔值")
     for name in (
         "points_per_yuan",
         "rp_base_points",
@@ -182,13 +184,17 @@ def _calendar_warning(settings: dict, year: int) -> str | None:
     )
 
 
-def price_snapshot(settings: dict, model: str, started_datetime: datetime) -> dict:
-    """Freeze the request-start price; callers persist it with the ledger row."""
+def price_snapshot(
+    settings: dict, model: str, started_datetime: datetime
+) -> dict | None:
+    """Freeze the request-start price or return None for an allowed unpriced model."""
     settings = validate_settings(settings)
     model = _label(model, "模型名称")
     cards = settings["model_prices"]
     priced_model = model if model in cards else MODEL_ALIASES.get(model, model)
     if priced_model not in cards:
+        if not settings["block_unpriced_models"]:
+            return None
         raise ValueError(f"模型 {model} 尚未配置价格，无法核算成本")
     if (
         not isinstance(started_datetime, datetime)
